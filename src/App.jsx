@@ -69,6 +69,7 @@ function fillPdvKeys(moisObj){
   PDV_LIST.forEach(p=>{
     if(!pdv[p.id]) pdv[p.id] = {ca:0,vars:{},clotures:[]};
   });
+  if(!pdv.evenementiel) pdv.evenementiel = {ca:0};
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
 }
 function initLocal(){
@@ -226,6 +227,34 @@ function moisLissage(startKey, count){
     keys.push(`${aa}-${mm}`);
   }
   return keys;
+}
+
+// ─── DÉTECTION DES DOUBLONS D'IMPORT ──────────────────────────────────────────
+function hashRow(row){
+  return `${row.dateOp}|${row.libelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
+}
+// Vérifie quelles lignes (par leur hash) ont déjà été importées précédemment
+async function checkDuplicateHashes(rows){
+  try{
+    const hashes = rows.map(hashRow);
+    const dup = new Set();
+    // Supabase .in() limite raisonnable : on découpe par lots de 200
+    for(let i=0;i<hashes.length;i+=200){
+      const batch = hashes.slice(i,i+200);
+      const { data, error } = await supabase.from("imported_lines").select("hash").in("hash", batch);
+      if(!error && data) data.forEach(d=>dup.add(d.hash));
+    }
+    return dup;
+  }catch(err){ console.error("check duplicates error",err); return new Set(); }
+}
+// Enregistre les lignes de cet import comme "vues" pour détecter les futurs doublons
+async function markRowsImported(rows){
+  try{
+    const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString() }));
+    for(let i=0;i<records.length;i+=200){
+      await supabase.from("imported_lines").upsert(records.slice(i,i+200));
+    }
+  }catch(err){ console.error("mark imported error",err); }
 }
 
 
@@ -597,6 +626,9 @@ function GestionPaiements({paiements, onChange}){
 function ImportCSV({data, md, onApplied}){
   const [text,setText]=useState("");
   const [rows,setRows]=useState(null); // résultat parsing
+  const [duplicateHashes,setDuplicateHashes]=useState(new Set());
+  const [checkingDup,setCheckingDup]=useState(false);
+  const [forceInclude,setForceInclude]=useState({}); // {rowId:true} pour inclure malgré le doublon
   const [rules,setRules]=useState({});
   const [loadingRules,setLoadingRules]=useState(true);
   const [pending,setPending]=useState({}); // {rowId: {type,pdvId,catId,lissage,nbMois}}
@@ -617,13 +649,21 @@ function ImportCSV({data, md, onApplied}){
     reader.readAsText(file, "ISO-8859-1"); // encodage courant des exports CIC
   };
 
-  const analyser=()=>{
+  const analyser=async ()=>{
     const parsed=parseCicCsv(text);
     setRows(parsed);
+    setCheckingDup(true);
+    const dup = await checkDuplicateHashes(parsed);
+    setDuplicateHashes(dup);
+    setCheckingDup(false);
   };
 
+  // Lignes considérées comme doublons (déjà vues dans un import précédent), sauf si forcées
+  const duplicateRows = rows ? rows.filter(r=>duplicateHashes.has(hashRow(r)) && !forceInclude[r.id]) : [];
+  const effectiveRows = rows ? rows.filter(r=>!duplicateHashes.has(hashRow(r)) || forceInclude[r.id]) : [];
+
   // Classification de chaque ligne
-  const classified = rows ? rows.map(row=>{
+  const classified = rows ? effectiveRows.map(row=>{
     const k = extractKeyword(row.libelle);
     let auto=null;
 
@@ -715,8 +755,8 @@ function ImportCSV({data, md, onApplied}){
           const vars = pdvMois.vars||{};
           moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, vars:{...vars,[op.catId]:(n(vars[op.catId])+part)}}}};
         } else if(op.type==="ca_event"){
-          const pdvMois = moisCache[k].pdv[op.pdvId] || {ca:0,vars:{},clotures:[]};
-          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, ca:(n(pdvMois.ca)+part)}}};
+          const ev = moisCache[k].pdv.evenementiel || {ca:0};
+          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, evenementiel: {ca:(n(ev.ca)+part)}}};
         }
       }
       // Mémoriser la règle apprise (pas pour les commissions CB, recalculées chaque fois)
@@ -741,6 +781,9 @@ function ImportCSV({data, md, onApplied}){
     }
     const newData = {...data, pdvCats:newPdvCats};
     await saveAppDataToSupabase(newData);
+
+    // 5. Mémoriser l'empreinte de toutes les lignes de ce relevé pour détecter les doublons futurs
+    await markRowsImported(rows);
 
     setApplied({ count: ops.length, total: ops.reduce((s,o)=>s+o.montant,0) });
     onApplied(newData, moisCache[startKey]);
@@ -779,8 +822,29 @@ function ImportCSV({data, md, onApplied}){
 
 
   return <div>
+    {checkingDup && <Card style={{marginBottom:16,background:C.bg}} pad={14}>
+      <div style={{fontSize:12,color:C.textMuted}}>🔍 Vérification des doublons avec les imports précédents…</div>
+    </Card>}
+
+    {duplicateRows.length>0 && <Card style={{marginBottom:16,background:C.redLight,border:`1px solid ${C.red}33`}}>
+      <SectionHead>⚠️ Doublons détectés ({duplicateRows.length})</SectionHead>
+      <div style={{fontSize:12,color:C.textMuted,marginBottom:10}}>
+        Ces lignes correspondent exactement à des transactions déjà importées précédemment (même date, même libellé, même montant) — probablement parce que la période se chevauche avec un import antérieur. Elles sont exclues par défaut.
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {duplicateRows.map(r=>(
+          <label key={r.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:12,background:C.white,borderRadius:8,padding:"8px 10px",cursor:"pointer"}}>
+            <input type="checkbox" checked={!!forceInclude[r.id]} onChange={e=>setForceInclude(f=>({...f,[r.id]:e.target.checked}))}/>
+            <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.dateOp} · {r.libelle}</span>
+            <strong>{(r.debit||r.credit).toLocaleString("fr-FR")} €</strong>
+          </label>
+        ))}
+      </div>
+      <div style={{fontSize:11,color:C.textLight,marginTop:8}}>Cochez une ligne pour l'inclure malgré tout si elle n'est pas réellement un doublon.</div>
+    </Card>}
+
     <Card style={{background:C.primaryLight,marginBottom:16}} pad={14}>
-      <div style={{fontSize:13,fontWeight:700,color:C.primary}}>📊 {rows.length} lignes lues</div>
+      <div style={{fontSize:13,fontWeight:700,color:C.primary}}>📊 {effectiveRows.length} ligne(s) à traiter{duplicateRows.length>0?` · ${duplicateRows.length} doublon(s) exclu(s)`:""}</div>
       <div style={{fontSize:12,color:C.textMuted,marginTop:4}}>
         {reconnues.length} reconnues automatiquement · {ignorees.length} ignorées (CA déjà saisi) · {aClasser.length} à classer
       </div>
@@ -872,15 +936,14 @@ function ImportCSV({data, md, onApplied}){
             <div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{c.row.libelle}</div>
             <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>{c.row.dateOp} · +{c.row.credit.toLocaleString("fr-FR")} €</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <select value={choix.type==="ca_event"?`event:${choix.pdvId}`:"ignore"}
+              <select value={choix.type==="ca_event"?"event":"ignore"}
                 onChange={e=>{
-                  const v=e.target.value;
-                  if(v==="ignore") setPend(c.row.id,{type:"ignore"});
-                  else { const pdvId=v.split(":")[1]; setPend(c.row.id,{type:"ca_event",pdvId,label:"Événementiel"}); }
+                  if(e.target.value==="ignore") setPend(c.row.id,{type:"ignore"});
+                  else setPend(c.row.id,{type:"ca_event",label:"Événementiel"});
                 }}
                 style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
                 <option value="ignore">Ignorer</option>
-                {PDV_LIST.map(p=><option key={p.id} value={`event:${p.id}`}>🎉 Événementiel · {p.nom}</option>)}
+                <option value="event">🎉 Événementiel</option>
               </select>
             </div>
           </div>;
@@ -1059,8 +1122,9 @@ function Dashboard({data,moisData}){
   const tL=totalLabo(data.laboCats,moisData.laboCh);
   const rep=repartition(moisData.pdv);
   const pdvs=PDV_LIST.map(p=>({...p,c:calcPDV(moisData.pdv[p.id],data.pdvCats[p.id],rep[p.id],tL)}));
-  const tCA=pdvs.reduce((a,p)=>a+p.c.ca,0);
-  const tNet=pdvs.reduce((a,p)=>a+p.c.res,0);
+  const caEvenementiel = n(moisData.pdv.evenementiel?.ca);
+  const tCA=pdvs.reduce((a,p)=>a+p.c.ca,0) + caEvenementiel;
+  const tNet=pdvs.reduce((a,p)=>a+p.c.res,0) + caEvenementiel;
   const catMat=data.laboCats.find(c=>c.id==="matieres");
   const totalMat=catMat?montantCat(catMat,moisData.laboCh):0;
   const tMB=tCA-totalMat;
@@ -1080,6 +1144,12 @@ function Dashboard({data,moisData}){
       <KPICard label="Résultat net" value={`${tNet.toLocaleString("fr-FR")} €`} sub={<Badge val={tCA>0?tNet/tCA*100:0}/>} color={tNet>=0?C.green:C.red}/>
       <KPICard label="Charges labo" value={`${tL.toLocaleString("fr-FR")} €`} color={C.accent}/>
     </div>
+    {caEvenementiel>0 && <Card style={{background:C.fixeLight,marginBottom:20}} pad={14}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{fontSize:13,fontWeight:700,color:C.fixe}}>🎉 CA Événementiel ce mois</div>
+        <div style={{fontSize:18,fontWeight:800,color:C.fixe}}>{caEvenementiel.toLocaleString("fr-FR")} €</div>
+      </div>
+    </Card>}
     <SectionHead>Classement des points de vente</SectionHead>
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       {sorted.map((p,i)=>{
