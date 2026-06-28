@@ -72,6 +72,7 @@ function fillPdvKeys(moisObj){
     if(!pdv[p.id]) pdv[p.id] = {ca:0,vars:{},clotures:[]};
   });
   if(!pdv.evenementiel) pdv.evenementiel = {ca:0};
+  if(!pdv._depenses) pdv._depenses = [];
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
 }
 function initLocal(){
@@ -441,15 +442,33 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const [pdvId,setPdvId]=useState(null);
   const [modes,setModes]=useState([]);
   const [note,setNote]=useState("");
+  const [depenses,setDepenses]=useState([]); // dépenses ajoutées par le vendeur, n'affectent pas le CA
+  const [depForm,setDepForm]=useState({montant:"",modeId:"",scope:"pdv",catId:""});
 
   const pdvInfo=PDV_LIST.find(p=>p.id===pdvId);
   const total=modes.reduce((s,m)=>s+n(m.montant),0);
+  const pdvCatsActuel = pdvId ? (data.pdvCats[pdvId]||[]) : [];
 
   const startSaisie=(id)=>{
     setPdvId(id);
     setModes(data.paiements.map(p=>({...p,montant:0})));
+    setDepenses([]);
+    setDepForm({montant:"",modeId:data.paiements[0]?.id||"",scope:"pdv",catId:(data.pdvCats[id]||[])[0]?.id||""});
     setStep("saisie");
   };
+
+  const ajouterDepense=()=>{
+    if(!n(depForm.montant)) return;
+    const cats = depForm.scope==="labo" ? data.laboCats : pdvCatsActuel;
+    const cat = cats.find(c=>c.id===depForm.catId) || cats[0];
+    const mode = data.paiements.find(p=>p.id===depForm.modeId);
+    setDepenses(ds=>[...ds, {
+      id:uid(), montant:n(depForm.montant), modeLabel:mode?.label||"—",
+      scope:depForm.scope, catId:cat?.id, catLabel:cat?.label||"Autre"
+    }]);
+    setDepForm({...depForm, montant:""});
+  };
+  const supprimerDepense=(id)=>setDepenses(ds=>ds.filter(d=>d.id!==id));
 
   const valider=()=>{
     const key=moisKey();
@@ -459,10 +478,32 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
       pdvId, date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
       modes:modes.map(m=>({...m})), total, note
     };
-    const old=d.mois[key].pdv[pdvId];
+    let mois = d.mois[key];
+    const old=mois.pdv[pdvId];
     const clotures=[...(old.clotures||[]),cloture];
     const ca=caDepuisClotures(clotures);
-    const newData={...d,mois:{...d.mois,[key]:{...d.mois[key],pdv:{...d.mois[key].pdv,[pdvId]:{...old,ca,clotures}}}}};
+    let pdvObj = {...mois.pdv, [pdvId]: {...old, ca, clotures}};
+    let laboCh = {...mois.laboCh};
+
+    // Applique les dépenses déclarées — sans toucher au CA
+    const depLog=[];
+    depenses.forEach(dep=>{
+      if(dep.scope==="labo"){
+        laboCh[dep.catId] = n(laboCh[dep.catId]) + dep.montant;
+      } else {
+        const pm = pdvObj[pdvId];
+        pdvObj = {...pdvObj, [pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:(n(pm.vars?.[dep.catId])+dep.montant)}}};
+      }
+      depLog.push({
+        id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
+        vendeurNom:vendeur.nom, pdvId, pdvLabel:pdvInfo?.full,
+        montant:dep.montant, modeLabel:dep.modeLabel, scope:dep.scope, catLabel:dep.catLabel
+      });
+    });
+    if(depLog.length>0) pdvObj = {...pdvObj, _depenses:[...(mois.pdv._depenses||[]), ...depLog]};
+
+    mois = {...mois, pdv:pdvObj, laboCh};
+    const newData={...d, mois:{...d.mois,[key]:mois}};
     onSave(newData);
     setStep("confirm");
   };
@@ -477,6 +518,10 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
         {modes.map(m=>n(m.montant)>0&&<div key={m.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:C.textMuted,marginBottom:4}}>
           <span>{m.label}</span><span style={{fontWeight:600}}>{n(m.montant).toLocaleString("fr-FR")} €</span>
         </div>)}
+        {depenses.length>0 && <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+          <div style={{fontSize:12,color:C.textMuted,marginBottom:6}}>💸 {depenses.length} dépense(s) déclarée(s)</div>
+          {depenses.map(dep=><div key={dep.id} style={{fontSize:12,color:C.textMuted}}>{dep.catLabel} · {dep.montant.toLocaleString("fr-FR")} €</div>)}
+        </div>}
         <button onClick={()=>{setStep("pdv");setPdvId(null);setNote("");}} style={{...base,marginTop:20,width:"100%",background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:14,cursor:"pointer"}}>
           Nouvelle clôture
         </button>
@@ -540,6 +585,61 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
           </div>
         </Card>
 
+        {/* Dépenses — n'affectent pas le CA */}
+        <Card style={{marginBottom:16,background:C.warnLight,border:`1px solid ${C.warn}`}}>
+          <SectionHead>💸 Dépense effectuée (optionnel)</SectionHead>
+          <div style={{fontSize:11,color:C.textMuted,marginBottom:12}}>N'affecte pas votre chiffre d'affaires — ajoutée directement comme charge.</div>
+
+          {depenses.length>0 && <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+            {depenses.map(dep=>(
+              <div key={dep.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.white,borderRadius:8,padding:"8px 10px"}}>
+                <div style={{fontSize:12}}>
+                  <strong>{dep.catLabel}</strong> · {dep.modeLabel} {dep.scope==="labo"?"· 🏭":""}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontWeight:700,fontSize:13}}>{dep.montant.toLocaleString("fr-FR")} €</span>
+                  <button onClick={()=>supprimerDepense(dep.id)} style={{...base,background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>×</button>
+                </div>
+              </div>
+            ))}
+          </div>}
+
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <div>
+              <Label>Montant</Label>
+              <MoneyInput value={depForm.montant} onChange={v=>setDepForm({...depForm,montant:v})}/>
+            </div>
+            <div>
+              <Label>Mode de paiement</Label>
+              <select value={depForm.modeId} onChange={e=>setDepForm({...depForm,modeId:e.target.value})}
+                style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+                {data.paiements.map(p=><option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>Catégorie</Label>
+              <select value={depForm.scope==="labo"?"labo":`pdv:${depForm.catId}`}
+                onChange={e=>{
+                  const v=e.target.value;
+                  if(v.startsWith("labo:")) setDepForm({...depForm,scope:"labo",catId:v.split(":")[1]});
+                  else setDepForm({...depForm,scope:"pdv",catId:v.split(":")[1]});
+                }}
+                style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+                <optgroup label="🏪 Ce point de vente">
+                  {pdvCatsActuel.map(c=><option key={c.id} value={`pdv:${c.id}`}>{c.label}</option>)}
+                </optgroup>
+                <optgroup label="🏭 Laboratoire (matières, fournitures...)">
+                  {data.laboCats.map(c=><option key={c.id} value={`labo:${c.id}`}>{c.label}</option>)}
+                </optgroup>
+              </select>
+            </div>
+            <button onClick={ajouterDepense} disabled={!n(depForm.montant)}
+              style={{...base,background:n(depForm.montant)?C.accent:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"10px",fontWeight:600,fontSize:13,cursor:n(depForm.montant)?"pointer":"not-allowed"}}>
+              + Ajouter cette dépense
+            </button>
+          </div>
+        </Card>
+
         {/* Total */}
         <Card style={{background:total>0?C.primary:C.bg,marginBottom:20}} pad={16}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -550,7 +650,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
         <button onClick={valider} disabled={total===0}
           style={{...base,width:"100%",background:total>0?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0?"pointer":"not-allowed",transition:"background 0.15s"}}>
-          Valider la clôture
+          Valider la clôture{depenses.length>0?` (+${depenses.length} dépense${depenses.length>1?"s":""})`:""}
         </button>
       </div>
     </div>
@@ -988,6 +1088,7 @@ function AllClotures({moisData}){
     });
   });
   const totalGlobal = Object.values(recapModes).reduce((a,b)=>a+b,0);
+  const depensesVendeurs = moisData.pdv._depenses||[];
 
   // Filtre optionnel par date (format JJ/MM ou texte libre sur dateLabel/vendeur/point de vente)
   const filtered = filtreDate.trim()
@@ -1014,6 +1115,21 @@ function AllClotures({moisData}){
         </div>
       ) : <div style={{fontSize:13,color:"rgba(255,255,255,0.6)"}}>Aucune clôture ce mois-ci</div>}
     </Card>
+
+    {depensesVendeurs.length>0 && <Card style={{marginBottom:20,background:C.warnLight,border:`1px solid ${C.warn}`}}>
+      <SectionHead>💸 Dépenses déclarées par les vendeurs ({depensesVendeurs.length})</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {[...depensesVendeurs].reverse().map(dep=>(
+          <div key={dep.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.white,borderRadius:8,padding:"8px 10px",fontSize:12}}>
+            <div>
+              <strong>{dep.catLabel}</strong> {dep.scope==="labo"?"· 🏭 Labo":`· ${dep.pdvLabel}`}
+              <div style={{color:C.textMuted,fontSize:11}}>{dep.dateLabel} · {dep.vendeurNom} · {dep.modeLabel}</div>
+            </div>
+            <strong style={{color:C.accent}}>{dep.montant.toLocaleString("fr-FR")} €</strong>
+          </div>
+        ))}
+      </div>
+    </Card>}
 
     {/* Filtre */}
     <div style={{marginBottom:14}}>
