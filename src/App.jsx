@@ -971,33 +971,80 @@ function ImportCSV({data, md, onApplied}){
 }
 
 // ─── CLÔTURES DU JOUR (vue patron) ───────────────────────────────────────────
-function CloturesToday({moisData}){
-  const today=todayKey();
+function AllClotures({moisData}){
+  const [filtreDate,setFiltreDate]=useState("");
+
   const entries=[];
   PDV_LIST.forEach(p=>{
-    (moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today).forEach(c=>entries.push({...c,pdvFull:p.full,pdvEmoji:p.emoji}));
+    (moisData.pdv[p.id]?.clotures||[]).forEach(c=>entries.push({...c,pdvFull:p.full,pdvEmoji:p.emoji}));
   });
-  if(entries.length===0) return <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune clôture saisie aujourd'hui</div></Card>;
-  return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-    {entries.map(c=>(
-      <Card key={c.id} pad={14}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-          <div>
-            <div style={{fontWeight:600,fontSize:14}}>{c.pdvEmoji} {c.pdvFull}</div>
-            <div style={{fontSize:12,color:C.textMuted}}>par {c.vendeurNom} · {c.dateLabel}</div>
-          </div>
-          <div style={{fontWeight:700,fontSize:18,color:C.primary}}>{n(c.total).toLocaleString("fr-FR")} €</div>
-        </div>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {c.modes.filter(m=>n(m.montant)>0).map(m=>(
-            <span key={m.id} style={{background:C.primaryLight,color:C.primary,borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:500}}>
-              {m.label} : {n(m.montant).toLocaleString("fr-FR")} €
-            </span>
+
+  // Récap par mode de paiement, sur tout le mois affiché
+  const recapModes={};
+  entries.forEach(c=>{
+    c.modes.forEach(m=>{
+      const montant=n(m.montant);
+      if(montant>0) recapModes[m.label]=(recapModes[m.label]||0)+montant;
+    });
+  });
+  const totalGlobal = Object.values(recapModes).reduce((a,b)=>a+b,0);
+
+  // Filtre optionnel par date (format JJ/MM ou texte libre sur dateLabel/vendeur/point de vente)
+  const filtered = filtreDate.trim()
+    ? entries.filter(c => c.dateLabel.includes(filtreDate.trim()) || c.pdvFull.toLowerCase().includes(filtreDate.trim().toLowerCase()) || c.vendeurNom.toLowerCase().includes(filtreDate.trim().toLowerCase()))
+    : entries;
+  const sorted = [...filtered].sort((a,b)=> b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+
+  return <div>
+    {/* Récap par mode de paiement */}
+    <Card style={{background:C.primary,marginBottom:20}} pad={18}>
+      <div style={{fontSize:11,fontWeight:600,color:"rgba(255,255,255,0.65)",letterSpacing:0.8,textTransform:"uppercase",marginBottom:8}}>Récap par mode de paiement — ce mois</div>
+      {totalGlobal>0 ? (
+        <div style={{display:"flex",flexWrap:"wrap",gap:14}}>
+          {Object.entries(recapModes).map(([label,montant])=>(
+            <div key={label}>
+              <div style={{fontSize:11,color:"rgba(255,255,255,0.6)"}}>{label}</div>
+              <div style={{fontSize:20,fontWeight:800,color:"#fff"}}>{montant.toLocaleString("fr-FR")} €</div>
+            </div>
           ))}
+          <div style={{marginLeft:"auto",textAlign:"right"}}>
+            <div style={{fontSize:11,color:"rgba(255,255,255,0.6)"}}>Total</div>
+            <div style={{fontSize:22,fontWeight:800,color:"#fff"}}>{totalGlobal.toLocaleString("fr-FR")} €</div>
+          </div>
         </div>
-        {c.note&&<div style={{marginTop:8,fontSize:12,color:C.textMuted,fontStyle:"italic"}}>📝 {c.note}</div>}
-      </Card>
-    ))}
+      ) : <div style={{fontSize:13,color:"rgba(255,255,255,0.6)"}}>Aucune clôture ce mois-ci</div>}
+    </Card>
+
+    {/* Filtre */}
+    <div style={{marginBottom:14}}>
+      <input value={filtreDate} onChange={e=>setFiltreDate(e.target.value)}
+        placeholder="🔍 Filtrer par date (ex: 15/06), point de vente ou vendeur…"
+        style={{...base,width:"100%",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}/>
+    </div>
+
+    <SectionHead>{filtreDate?`Résultats (${sorted.length})`:`Historique des clôtures (${sorted.length})`}</SectionHead>
+    {sorted.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune clôture trouvée</div></Card>}
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {sorted.map(c=>(
+        <Card key={c.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:6}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:14}}>{c.pdvEmoji} {c.pdvFull}</div>
+              <div style={{fontSize:12,color:C.textMuted}}>par {c.vendeurNom} · {c.dateLabel}</div>
+            </div>
+            <div style={{fontWeight:700,fontSize:18,color:C.primary}}>{n(c.total).toLocaleString("fr-FR")} €</div>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {c.modes.filter(m=>n(m.montant)>0).map(m=>(
+              <span key={m.id} style={{background:C.primaryLight,color:C.primary,borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:500}}>
+                {m.label} : {n(m.montant).toLocaleString("fr-FR")} €
+              </span>
+            ))}
+          </div>
+          {c.note&&<div style={{marginTop:8,fontSize:12,color:C.textMuted,fontStyle:"italic"}}>📝 {c.note}</div>}
+        </Card>
+      ))}
+    </div>
   </div>;
 }
 
@@ -1220,7 +1267,7 @@ function AppPatron({data,setData,onLogout}){
   const info=PDV_LIST.find(p=>p.id===page);
   const nav=[
     {id:"dashboard",label:"Dashboard",icon:"📊"},
-    {id:"clotures",label:"Clôtures du jour",icon:"📋"},
+    {id:"clotures",label:"Clôtures",icon:"📋"},
     {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
     ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
@@ -1265,12 +1312,12 @@ function AppPatron({data,setData,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="clotures"?"📋 Clôtures du jour":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
         {page==="dashboard"&&<Dashboard data={data} moisData={md}/>}
-        {page==="clotures"&&<CloturesToday moisData={md}/>}
+        {page==="clotures"&&<AllClotures moisData={md}/>}
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
