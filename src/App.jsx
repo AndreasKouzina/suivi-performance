@@ -127,6 +127,81 @@ async function saveMoisToSupabase(key, moisObj){
   }catch(err){ console.error("Supabase save mois_data error:", err); }
 }
 
+// ─── IMPORT CSV — parsing, règles, classification ─────────────────────────────
+async function loadImportRules(){
+  try{
+    const { data, error } = await supabase.from("import_rules").select("*");
+    if(error) return {};
+    const map={};
+    (data||[]).forEach(r=>{ map[r.keyword]=r.target; });
+    return map;
+  }catch{ return {}; }
+}
+async function saveImportRule(keyword, target){
+  try{ await supabase.from("import_rules").upsert({ keyword, target, updated_at:new Date().toISOString() }); }
+  catch(err){ console.error("save rule error",err); }
+}
+
+// Parse CSV CIC : DateOp;DateVal;Debit;Credit;Libelle;Solde
+function parseCicCsv(text){
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const rows=[];
+  for(const line of lines){
+    const parts=line.split(";");
+    if(parts.length<5) continue;
+    const [dateOp,dateVal,debit,credit,libelle] = parts;
+    // Ignorer l'en-tête éventuel
+    if(!/^\d{2}\/\d{2}\/\d{4}$/.test(dateOp)) continue;
+    const montantDebit = debit ? Math.abs(n(debit.replace(",","."))) : 0;
+    const montantCredit = credit ? Math.abs(n(credit.replace(",","."))) : 0;
+    rows.push({
+      id: uid(),
+      dateOp, dateVal,
+      libelle: (libelle||"").trim(),
+      debit: montantDebit,
+      credit: montantCredit,
+    });
+  }
+  return rows;
+}
+
+// Extrait un mot-clé simplifié depuis le libellé + détecte le type de ligne
+function extractKeyword(libelle){
+  const isComCB = /^COMCB/i.test(libelle);
+  const isRemCB = /^REMCB/i.test(libelle);
+  const isPrlv = /^PRLV/i.test(libelle);
+  const isPaiementCB = /PAIEMENT CB|PAIEMENT PSC/i.test(libelle);
+  const isCheque = /^CHEQUE/i.test(libelle);
+  const isVir = /^VIR /i.test(libelle);
+  // Mot-clé "propre" : on retire les codes numériques, dates, références
+  let clean = libelle
+    .replace(/COMCB\d+|REMCB\d+|NB\d+|TPE\d+|CARTE\s?\d+|PSC\s?\d+|CB\s?\d{4}|FAC\sDU.*|RL-[\dA-Z-]+|SIRET\s?\d+|G\d{6,}/gi," ")
+    .replace(/\s{2,}/g," ").trim();
+  return { isComCB, isRemCB, isPrlv, isPaiementCB, isCheque, isVir, clean };
+}
+
+function findRuleMatch(clean, rules){
+  const upper=clean.toUpperCase();
+  // recherche du mot-clé le plus long contenu dans le libellé
+  let best=null, bestLen=0;
+  for(const kw of Object.keys(rules)){
+    if(upper.includes(kw.toUpperCase()) && kw.length>bestLen){ best=kw; bestLen=kw.length; }
+  }
+  return best ? rules[best] : null;
+}
+
+// Calcule les mois cibles pour un lissage donné, à partir d'un mois de départ
+function moisLissage(startKey, count){
+  const [a,m] = startKey.split("-").map(Number);
+  const keys=[];
+  for(let i=0;i<count;i++){
+    let mm=m+i, aa=a;
+    while(mm>11){ mm-=12; aa++; }
+    keys.push(`${aa}-${mm}`);
+  }
+  return keys;
+}
+
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
@@ -492,6 +567,280 @@ function GestionPaiements({paiements, onChange}){
   </div>;
 }
 
+// ─── IMPORT CSV ───────────────────────────────────────────────────────────────
+function ImportCSV({data, md, onApplied}){
+  const [text,setText]=useState("");
+  const [rows,setRows]=useState(null); // résultat parsing
+  const [rules,setRules]=useState({});
+  const [loadingRules,setLoadingRules]=useState(true);
+  const [pending,setPending]=useState({}); // {rowId: {type,pdvId,catId,lissage,nbMois}}
+  const [applied,setApplied]=useState(null); // résumé après validation
+
+  useEffect(()=>{
+    (async()=>{
+      const r=await loadImportRules();
+      setRules(r); setLoadingRules(false);
+    })();
+  },[]);
+
+  const handleFile=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>setText(ev.target.result);
+    reader.readAsText(file, "ISO-8859-1"); // encodage courant des exports CIC
+  };
+
+  const analyser=()=>{
+    const parsed=parseCicCsv(text);
+    setRows(parsed);
+  };
+
+  // Classification de chaque ligne
+  const classified = rows ? rows.map(row=>{
+    const k = extractKeyword(row.libelle);
+    let auto=null;
+
+    if(k.isRemCB){
+      // Encaissement CB : déjà compté dans le CA via les clôtures des vendeurs.
+      auto = { type:"ignore", reason:"Encaissement CB — déjà couvert par les clôtures de caisse" };
+    } else if(k.isComCB){
+      // Commission CB : traitée à part, répartie au prorata du CB encaissé par point de vente.
+      auto = { type:"com_cb" };
+    } else {
+      const rule = findRuleMatch(k.clean, rules);
+      if(rule){
+        const montant = row.debit||row.credit;
+        auto = { ...rule, montant };
+      }
+    }
+    return { row, k, auto };
+  }) : [];
+
+  const aClasser = classified.filter(c=>!c.auto && c.row.debit>0); // on ne classe que les débits (charges) pour l'instant
+  const reconnues = classified.filter(c=>c.auto && c.auto.type!=="ignore" && c.auto.type!=="com_cb");
+  const ignorees = classified.filter(c=>c.auto && c.auto.type==="ignore");
+  const comCbLines = classified.filter(c=>c.auto && c.auto.type==="com_cb");
+  const totalComCB = comCbLines.reduce((s,c)=>s+c.row.debit,0);
+  const credits = classified.filter(c=>!c.auto && c.row.credit>0);
+
+  // Trouve l'id du mode de paiement "carte bancaire" parmi les modes configurés
+  const cbModeId = (()=>{
+    const m = data.paiements.find(p=>/cb|carte/i.test(p.label) || p.id==="cb");
+    return m?.id;
+  })();
+
+  // CB encaissé par point de vente ce mois-ci (via les clôtures vendeurs)
+  const cbParPdv = PDV_LIST.reduce((acc,p)=>{
+    const clotures = md.pdv[p.id]?.clotures||[];
+    const total = clotures.reduce((s,cl)=>{
+      const mode = cl.modes.find(m=>m.id===cbModeId);
+      return s + (mode?n(mode.montant):0);
+    },0);
+    acc[p.id]=total; return acc;
+  },{});
+  const totalCbGlobal = Object.values(cbParPdv).reduce((a,b)=>a+b,0);
+
+  const allCatsLabo = data.laboCats;
+  const setPend=(rowId,val)=>setPending(p=>({...p,[rowId]:val}));
+
+  const validerTout = async ()=>{
+    // 1. Construire la liste finale d'opérations à appliquer (reconnues + celles classées manuellement)
+    const ops=[...reconnues.map(c=>({...c.auto, libelle:c.row.libelle}))];
+    for(const c of aClasser){
+      const choix=pending[c.row.id];
+      if(choix && choix.type!=="ignore"){
+        ops.push({...choix, montant:c.row.debit, libelle:c.row.libelle, _learnKeyword:c.k.clean});
+      }
+    }
+
+    // 1bis. Commissions CB : réparties au prorata du CB encaissé par chaque point de vente
+    if(totalComCB>0 && totalCbGlobal>0){
+      PDV_LIST.forEach(p=>{
+        const part = totalComCB * (cbParPdv[p.id]/totalCbGlobal);
+        if(part>0) ops.push({ type:"pdv", pdvId:p.id, catId:"frais_cb", label:"Frais bancaires CB", montant:part, lissage:"ponctuel" });
+      });
+    }
+
+    // 2. Appliquer chaque opération aux bons mois (avec lissage)
+    const moisCache = { [data.active]: md }; // on ne modifie que le mois actif + futurs si lissage
+    const startKey = data.active;
+
+    for(const op of ops){
+      const nbMois = op.lissage==="trimestriel"?3 : op.lissage==="annuel"?12 : op.lissage==="personnalise"?(op.nbMois||1) : 1;
+      const part = op.montant / nbMois;
+      const keys = moisLissage(startKey, nbMois);
+      for(const k of keys){
+        if(!moisCache[k]){
+          // mois futur pas encore en cache : on part d'un mois vide compatible
+          moisCache[k] = initMois();
+        }
+        if(op.type==="labo"){
+          const cat = moisCache[k].laboCh || {};
+          moisCache[k] = {...moisCache[k], laboCh: {...cat, [op.catId]: (n(cat[op.catId])+part)} };
+        } else if(op.type==="pdv"){
+          const pdvMois = moisCache[k].pdv[op.pdvId] || {ca:0,vars:{},clotures:[]};
+          const vars = pdvMois.vars||{};
+          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, vars:{...vars,[op.catId]:(n(vars[op.catId])+part)}}}};
+        }
+      }
+      // Mémoriser la règle apprise (pas pour les commissions CB, recalculées chaque fois)
+      if(op._learnKeyword){
+        await saveImportRule(op._learnKeyword, { type:op.type, pdvId:op.pdvId, catId:op.catId, label:op.label, lissage:op.lissage||"ponctuel", nbMois:op.nbMois });
+      }
+    }
+
+    // 3. S'assurer que la catégorie "frais_cb" existe dans chaque pdvCats concerné
+    let newPdvCats = {...data.pdvCats};
+    const pdvIdsUsed = new Set(ops.filter(o=>o.type==="pdv"&&o.catId==="frais_cb").map(o=>o.pdvId));
+    pdvIdsUsed.forEach(pid=>{
+      const cats=newPdvCats[pid]||[];
+      if(!cats.find(c=>c.id==="frais_cb")){
+        newPdvCats[pid] = [...cats, {id:"frais_cb",label:"Frais bancaires CB",type:"variable",montantFixe:0}];
+      }
+    });
+
+    // 4. Sauvegarder tous les mois touchés + pdvCats si modifiés
+    for(const [key,moisObj] of Object.entries(moisCache)){
+      await saveMoisToSupabase(key, moisObj);
+    }
+    const newData = {...data, pdvCats:newPdvCats};
+    await saveAppDataToSupabase(newData);
+
+    setApplied({ count: ops.length, total: ops.reduce((s,o)=>s+o.montant,0) });
+    onApplied(newData, moisCache[startKey]);
+  };
+
+  if(loadingRules) return <Card pad={24}><div style={{color:C.textMuted,fontSize:13}}>Chargement des règles…</div></Card>;
+
+  if(applied) return (
+    <Card style={{textAlign:"center"}} pad={32}>
+      <div style={{fontSize:44,marginBottom:10}}>✅</div>
+      <div style={{fontWeight:800,fontSize:18,color:C.primary,marginBottom:6}}>Import terminé</div>
+      <div style={{fontSize:13,color:C.textMuted}}>{applied.count} dépense(s) classée(s) · {applied.total.toLocaleString("fr-FR")} € au total</div>
+      <button onClick={()=>{setApplied(null);setRows(null);setText("");}} style={{...base,marginTop:18,background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"11px 20px",fontWeight:600,cursor:"pointer"}}>Nouvel import</button>
+    </Card>
+  );
+
+  if(!rows) return (
+    <div>
+      <Card style={{marginBottom:16}}>
+        <SectionHead>📥 Importer un relevé CIC</SectionHead>
+        <div style={{fontSize:12,color:C.textMuted,marginBottom:12}}>
+          Téléchargez votre relevé en CSV depuis votre espace CIC, puis importez-le ici. L'app classe automatiquement les dépenses connues et vous demande pour les nouvelles. Les lignes liées aux TPE (encaissements CB) sont ignorées car votre CA est déjà saisi via les clôtures de caisse.
+        </div>
+        <input type="file" accept=".csv,.txt" onChange={handleFile}
+          style={{...base,marginBottom:12,fontSize:13}}/>
+        <div style={{fontSize:11,color:C.textLight,marginBottom:10}}>— ou collez le contenu directement —</div>
+        <textarea value={text} onChange={e=>setText(e.target.value)} rows={6} placeholder="Collez ici le contenu du fichier CSV…"
+          style={{...base,width:"100%",padding:10,borderRadius:8,border:`1.5px solid ${C.border}`,fontFamily:"monospace",fontSize:11,outline:"none"}}/>
+        <button onClick={analyser} disabled={!text.trim()}
+          style={{...base,marginTop:12,background:text.trim()?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:10,padding:"11px 22px",fontWeight:700,cursor:text.trim()?"pointer":"not-allowed"}}>
+          Analyser le fichier
+        </button>
+      </Card>
+    </div>
+  );
+
+
+  return <div>
+    <Card style={{background:C.primaryLight,marginBottom:16}} pad={14}>
+      <div style={{fontSize:13,fontWeight:700,color:C.primary}}>📊 {rows.length} lignes lues</div>
+      <div style={{fontSize:12,color:C.textMuted,marginTop:4}}>
+        {reconnues.length} reconnues automatiquement · {ignorees.length} ignorées (CA déjà saisi) · {aClasser.length} à classer
+      </div>
+    </Card>
+
+    {reconnues.length>0 && <Card style={{marginBottom:16}}>
+      <SectionHead>🟢 Classées automatiquement</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:240,overflowY:"auto"}}>
+        {reconnues.map(c=>(
+          <div key={c.row.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
+            <span style={{color:C.textMuted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"60%"}}>{c.row.libelle}</span>
+            <span style={{fontWeight:600}}>{c.auto.label||c.auto.catId} · {c.auto.montant.toLocaleString("fr-FR")} €</span>
+          </div>
+        ))}
+      </div>
+    </Card>}
+
+    {aClasser.length>0 && <Card style={{marginBottom:16}}>
+      <SectionHead>🔴 À classer ({aClasser.length})</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {aClasser.map(c=>{
+          const choix=pending[c.row.id]||{type:"ignore"};
+          return <div key={c.row.id} style={{background:C.bg,borderRadius:10,padding:12}}>
+            <div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{c.row.libelle}</div>
+            <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>{c.row.dateOp} · {c.row.debit.toLocaleString("fr-FR")} €</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <select value={choix.type==="labo"?"labo":choix.type==="pdv"?`pdv:${choix.pdvId}`:"ignore"}
+                onChange={e=>{
+                  const v=e.target.value;
+                  if(v==="ignore") setPend(c.row.id,{type:"ignore"});
+                  else if(v==="labo") setPend(c.row.id,{type:"labo",catId:allCatsLabo[0]?.id,label:allCatsLabo[0]?.label,lissage:"ponctuel"});
+                  else { const pdvId=v.split(":")[1]; const cats=data.pdvCats[pdvId]||[]; setPend(c.row.id,{type:"pdv",pdvId,catId:cats[0]?.id,label:cats[0]?.label,lissage:"ponctuel"}); }
+                }}
+                style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                <option value="ignore">Ignorer</option>
+                <option value="labo">🏭 Charge du Labo</option>
+                {PDV_LIST.map(p=><option key={p.id} value={`pdv:${p.id}`}>{p.emoji} {p.nom}</option>)}
+              </select>
+
+              {choix.type==="labo" && <select value={choix.catId} onChange={e=>{const cat=allCatsLabo.find(c2=>c2.id===e.target.value);setPend(c.row.id,{...choix,catId:cat.id,label:cat.label});}}
+                style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                {allCatsLabo.map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+              </select>}
+
+              {choix.type==="pdv" && <select value={choix.catId} onChange={e=>{const cats=data.pdvCats[choix.pdvId]||[];const cat=cats.find(c2=>c2.id===e.target.value);setPend(c.row.id,{...choix,catId:cat.id,label:cat.label});}}
+                style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                {(data.pdvCats[choix.pdvId]||[]).map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+              </select>}
+
+              {choix.type!=="ignore" && <select value={choix.lissage||"ponctuel"} onChange={e=>setPend(c.row.id,{...choix,lissage:e.target.value})}
+                style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                <option value="ponctuel">Ponctuel (ce mois)</option>
+                <option value="trimestriel">Trimestriel (÷3)</option>
+                <option value="annuel">Annuel (÷12)</option>
+              </select>}
+            </div>
+          </div>;
+        })}
+      </div>
+    </Card>}
+
+    {totalComCB>0 && <Card style={{marginBottom:16,background:C.fixeLight,border:`1px solid ${C.fixe}33`}}>
+      <SectionHead>💳 Commissions CB — {totalComCB.toLocaleString("fr-FR")} €</SectionHead>
+      {totalCbGlobal>0 ? (
+        <div>
+          <div style={{fontSize:12,color:C.textMuted,marginBottom:10}}>Réparties au prorata du CB encaissé par chaque point de vente ce mois-ci :</div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {PDV_LIST.filter(p=>cbParPdv[p.id]>0).map(p=>{
+              const part = totalComCB * (cbParPdv[p.id]/totalCbGlobal);
+              return <div key={p.id} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                <span>{p.emoji} {p.nom} <span style={{color:C.textLight}}>({(cbParPdv[p.id]/totalCbGlobal*100).toFixed(0)}% du CB)</span></span>
+                <strong>{part.toLocaleString("fr-FR")} €</strong>
+              </div>;
+            })}
+          </div>
+        </div>
+      ) : (
+        <div style={{fontSize:12,color:C.accent}}>⚠️ Aucun encaissement CB trouvé dans les clôtures de ce mois — impossible de répartir. Vérifiez que vos vendeurs ont bien saisi leurs clôtures avant d'importer.</div>
+      )}
+    </Card>}
+
+    {credits.length>0 && <Card style={{marginBottom:16,background:C.variableLight}}>
+      <SectionHead>💰 Autres encaissements détectés</SectionHead>
+      <div style={{fontSize:12,color:C.textMuted,marginBottom:8}}>Non classés automatiquement — généralement déjà couverts par vos clôtures de caisse.</div>
+      {credits.map(c=>(
+        <div key={c.row.id} style={{fontSize:12,padding:"4px 0"}}>{c.row.libelle} · <strong>{c.row.credit.toLocaleString("fr-FR")} €</strong></div>
+      ))}
+    </Card>}
+
+    <button onClick={validerTout} style={{...base,width:"100%",background:C.primary,color:"#fff",border:"none",borderRadius:12,padding:15,fontWeight:700,fontSize:15,cursor:"pointer"}}>
+      Valider et appliquer ({reconnues.length + aClasser.filter(c=>pending[c.row.id]&&pending[c.row.id].type!=="ignore").length + (totalComCB>0&&totalCbGlobal>0?PDV_LIST.filter(p=>cbParPdv[p.id]>0).length:0)} opérations)
+    </button>
+  </div>;
+}
+
 // ─── CLÔTURES DU JOUR (vue patron) ───────────────────────────────────────────
 function CloturesToday({moisData}){
   const today=todayKey();
@@ -736,6 +1085,7 @@ function AppPatron({data,setData,onLogout}){
   const nav=[
     {id:"dashboard",label:"Dashboard",icon:"📊"},
     {id:"clotures",label:"Clôtures du jour",icon:"📋"},
+    {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
     ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
@@ -779,7 +1129,7 @@ function AppPatron({data,setData,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="clotures"?"📋 Clôtures du jour":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="clotures"?"📋 Clôtures du jour":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -788,6 +1138,7 @@ function AppPatron({data,setData,onLogout}){
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
+        {page==="import"&&<ImportCSV data={data} md={md} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
       </div>
     </div>
