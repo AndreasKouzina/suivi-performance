@@ -12,8 +12,10 @@ const PDV_LIST = [
   { id:"vanves",     nom:"Vanves",         full:"Marché Vanves",         emoji:"🏪", j:1, jours:"Sam" },
   { id:"convention", nom:"Convention",     full:"Marché Convention",     emoji:"🏪", j:1, jours:"Dim" },
   { id:"malakoff",   nom:"Malakoff",       full:"Marché Malakoff",       emoji:"🏪", j:3, jours:"Mer · Ven · Sam" },
-  { id:"boulogne",   nom:"Boulogne",       full:"Marché Boulogne",       emoji:"🏪", j:5, jours:"Mar · Mer · Ven · Sam · Dim" },
-  { id:"clamart",    nom:"Clamart",        full:"Marché Clamart",        emoji:"🏪", j:2, jours:"Sam · Dim" },
+  { id:"escudier",   nom:"Escudier",       full:"Marché Escudier",       emoji:"🏪", j:3, jours:"Mar · Ven · Dim" },
+  { id:"billancourt",nom:"Billancourt",    full:"Marché Billancourt",    emoji:"🏪", j:2, jours:"Mer · Sam" },
+  { id:"trosy",      nom:"Trosy",          full:"Marché Trosy",          emoji:"🏪", j:1, jours:"Sam" },
+  { id:"fourche",    nom:"La Fourche",     full:"Marché La Fourche",     emoji:"🏪", j:1, jours:"Dim" },
   { id:"vavin",      nom:"Vavin",          full:"Boutique Vavin",        emoji:"🏬", j:7, jours:"7j/7 · 10h–21h" },
   { id:"alesia",     nom:"Alésia",         full:"Boutique Alésia",       emoji:"🏬", j:7, jours:"7j/7 · 10h–21h" },
 ];
@@ -100,8 +102,19 @@ function migrateLaboCats(data){
     cats = [...cats, {id:"packaging", label:"Packaging", type:"variable", montantFixe:0}];
     changed = true;
   }
+
+  // S'assure que chaque point de vente actuel a bien ses catégories de charges
+  // (utile après l'ajout de nouveaux points de vente, ex: Trosy, Escudier...)
+  let pdvCats = {...data.pdvCats};
+  PDV_LIST.forEach(p=>{
+    if(!pdvCats[p.id]){
+      pdvCats[p.id] = DEFAULT_PDV_CATS.map(c=>({...c}));
+      changed = true;
+    }
+  });
+
   if(!changed) return data;
-  return {...data, laboCats:cats};
+  return {...data, laboCats:cats, pdvCats};
 }
 
 // Charge toutes les données depuis Supabase (app_data + tous les mois_data)
