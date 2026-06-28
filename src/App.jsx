@@ -22,15 +22,16 @@ const MOIS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août"
 const JOURS_SEMAINE = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
 
 const DEFAULT_LABO_CATS = [
-  { id:"matieres", label:"Achats matières premières", type:"variable", montantFixe:0 },
-  { id:"loyer",    label:"Loyer",                     type:"fixe",     montantFixe:0 },
-  { id:"elec",     label:"Électricité",               type:"variable", montantFixe:0 },
-  { id:"gaz",      label:"Gaz",                       type:"variable", montantFixe:0 },
-  { id:"eau",      label:"Eau",                       type:"variable", montantFixe:0 },
-  { id:"sal",      label:"Salaires bruts",            type:"fixe",     montantFixe:0 },
-  { id:"cs",       label:"Charges sociales",          type:"fixe",     montantFixe:0 },
-  { id:"fourni",   label:"Fournitures",               type:"variable", montantFixe:0 },
-  { id:"autre",    label:"Autres",                    type:"variable", montantFixe:0 },
+  { id:"matieres",  label:"Achats matières premières", type:"variable", montantFixe:0 },
+  { id:"loyer",     label:"Loyer",                     type:"fixe",     montantFixe:0 },
+  { id:"elec",      label:"Électricité",               type:"variable", montantFixe:0 },
+  { id:"eau",       label:"Eau",                       type:"variable", montantFixe:0 },
+  { id:"sal",       label:"Salaires bruts",            type:"fixe",     montantFixe:0 },
+  { id:"cs",        label:"Charges sociales",          type:"fixe",     montantFixe:0 },
+  { id:"fourni",    label:"Fournitures",               type:"variable", montantFixe:0 },
+  { id:"carburant", label:"Carburant",                 type:"variable", montantFixe:0 },
+  { id:"packaging", label:"Packaging",                 type:"variable", montantFixe:0 },
+  { id:"autre",     label:"Autres",                    type:"variable", montantFixe:0 },
 ];
 const DEFAULT_PDV_CATS = [
   { id:"loyer",     label:"Loyer / Emplacement", type:"fixe",     montantFixe:0 },
@@ -84,6 +85,22 @@ function initLocal(){
 function ensureMois(data, key){
   if(data.mois[key]) return {...data, mois:{...data.mois,[key]:fillPdvKeys(data.mois[key])}};
   return {...data, mois:{...data.mois,[key]:initMois()}};
+}
+
+// Migration ponctuelle des catégories labo : ajoute Carburant/Packaging, retire Gaz
+function migrateLaboCats(data){
+  let cats = (data.laboCats||[]).filter(c=>c.id!=="gaz");
+  let changed = cats.length !== (data.laboCats||[]).length;
+  if(!cats.find(c=>c.id==="carburant")){
+    cats = [...cats, {id:"carburant", label:"Carburant", type:"variable", montantFixe:0}];
+    changed = true;
+  }
+  if(!cats.find(c=>c.id==="packaging")){
+    cats = [...cats, {id:"packaging", label:"Packaging", type:"variable", montantFixe:0}];
+    changed = true;
+  }
+  if(!changed) return data;
+  return {...data, laboCats:cats};
 }
 
 // Charge toutes les données depuis Supabase (app_data + tous les mois_data)
@@ -662,6 +679,12 @@ function ImportCSV({data, md, onApplied}){
         ops.push({...choix, montant:c.row.debit, libelle:c.row.libelle, _learnKeyword:c.k.clean});
       }
     }
+    for(const c of credits){
+      const choix=pending[c.row.id];
+      if(choix && choix.type!=="ignore"){
+        ops.push({...choix, montant:c.row.credit, libelle:c.row.libelle, _learnKeyword:c.k.clean});
+      }
+    }
 
     // 1bis. Commissions CB : réparties au prorata du CB encaissé par chaque point de vente
     if(totalComCB>0 && totalCbGlobal>0){
@@ -691,6 +714,9 @@ function ImportCSV({data, md, onApplied}){
           const pdvMois = moisCache[k].pdv[op.pdvId] || {ca:0,vars:{},clotures:[]};
           const vars = pdvMois.vars||{};
           moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, vars:{...vars,[op.catId]:(n(vars[op.catId])+part)}}}};
+        } else if(op.type==="ca_event"){
+          const pdvMois = moisCache[k].pdv[op.pdvId] || {ca:0,vars:{},clotures:[]};
+          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, ca:(n(pdvMois.ca)+part)}}};
         }
       }
       // Mémoriser la règle apprise (pas pour les commissions CB, recalculées chaque fois)
@@ -837,15 +863,33 @@ function ImportCSV({data, md, onApplied}){
     </Card>}
 
     {credits.length>0 && <Card style={{marginBottom:16,background:C.variableLight}}>
-      <SectionHead>💰 Autres encaissements détectés</SectionHead>
-      <div style={{fontSize:12,color:C.textMuted,marginBottom:8}}>Non classés automatiquement — généralement déjà couverts par vos clôtures de caisse.</div>
-      {credits.map(c=>(
-        <div key={c.row.id} style={{fontSize:12,padding:"4px 0"}}>{c.row.libelle} · <strong>{c.row.credit.toLocaleString("fr-FR")} €</strong></div>
-      ))}
+      <SectionHead>💰 Encaissements à classer ({credits.length})</SectionHead>
+      <div style={{fontSize:12,color:C.textMuted,marginBottom:10}}>Virements reçus hors TPE/Sumup — par exemple un règlement client pour un événement.</div>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {credits.map(c=>{
+          const choix=pending[c.row.id]||{type:"ignore"};
+          return <div key={c.row.id} style={{background:C.white,borderRadius:10,padding:12}}>
+            <div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{c.row.libelle}</div>
+            <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>{c.row.dateOp} · +{c.row.credit.toLocaleString("fr-FR")} €</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <select value={choix.type==="ca_event"?`event:${choix.pdvId}`:"ignore"}
+                onChange={e=>{
+                  const v=e.target.value;
+                  if(v==="ignore") setPend(c.row.id,{type:"ignore"});
+                  else { const pdvId=v.split(":")[1]; setPend(c.row.id,{type:"ca_event",pdvId,label:"Événementiel"}); }
+                }}
+                style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                <option value="ignore">Ignorer</option>
+                {PDV_LIST.map(p=><option key={p.id} value={`event:${p.id}`}>🎉 Événementiel · {p.nom}</option>)}
+              </select>
+            </div>
+          </div>;
+        })}
+      </div>
     </Card>}
 
     <button onClick={validerTout} style={{...base,width:"100%",background:C.primary,color:"#fff",border:"none",borderRadius:12,padding:15,fontWeight:700,fontSize:15,cursor:"pointer"}}>
-      Valider et appliquer ({reconnues.length + aClasser.filter(c=>pending[c.row.id]&&pending[c.row.id].type!=="ignore").length + (totalComCB>0&&totalCbGlobal>0?PDV_LIST.filter(p=>cbParPdv[p.id]>0).length:0)} opérations)
+      Valider et appliquer ({reconnues.length + aClasser.filter(c=>pending[c.row.id]&&pending[c.row.id].type!=="ignore").length + credits.filter(c=>pending[c.row.id]&&pending[c.row.id].type!=="ignore").length + (totalComCB>0&&totalCbGlobal>0?PDV_LIST.filter(p=>cbParPdv[p.id]>0).length:0)} opérations)
     </button>
   </div>;
 }
@@ -1166,7 +1210,11 @@ export default function App(){
     let mounted=true;
     loadFromSupabase().then(remote=>{
       if(!mounted) return;
-      if(remote){ setData(remote); saveCache(remote); }
+      if(remote){
+        const migrated = migrateLaboCats(remote);
+        setData(migrated); saveCache(migrated);
+        if(migrated!==remote) saveAppDataToSupabase(migrated);
+      }
       else { setSyncError(true); }
       setReady(true);
     });
