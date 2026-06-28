@@ -1124,7 +1124,7 @@ function AppPatron({data,setData,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","clotures","labo","vendeurs","paiements"].includes(item.id)){
+          if(!["dashboard","clotures","import","labo","vendeurs","paiements"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
