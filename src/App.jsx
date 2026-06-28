@@ -61,6 +61,15 @@ function moisKey(d=new Date()){ return `${d.getFullYear()}-${d.getMonth()}`; }
 function initMois(){
   return { laboCh:{}, pdv:Object.fromEntries(PDV_LIST.map(p=>[p.id,{ca:0,vars:{},clotures:[]}])) };
 }
+// Garantit que tous les points de vente existent dans un objet "mois", même si
+// les données stockées (Supabase ou anciennes versions) en manquaient certains.
+function fillPdvKeys(moisObj){
+  const pdv = {...(moisObj.pdv||{})};
+  PDV_LIST.forEach(p=>{
+    if(!pdv[p.id]) pdv[p.id] = {ca:0,vars:{},clotures:[]};
+  });
+  return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
+}
 function initLocal(){
   const key=moisKey();
   return {
@@ -73,7 +82,7 @@ function initLocal(){
   };
 }
 function ensureMois(data, key){
-  if(data.mois[key]) return data;
+  if(data.mois[key]) return {...data, mois:{...data.mois,[key]:fillPdvKeys(data.mois[key])}};
   return {...data, mois:{...data.mois,[key]:initMois()}};
 }
 
@@ -85,7 +94,7 @@ async function loadFromSupabase(){
     const { data: moisRows, error: e2 } = await supabase.from("mois_data").select("*");
     if(e2) return null;
     const mois = {};
-    (moisRows||[]).forEach(r=>{ mois[r.mois_key] = { laboCh: r.labo_ch||{}, pdv: r.pdv||{} }; });
+    (moisRows||[]).forEach(r=>{ mois[r.mois_key] = fillPdvKeys({ laboCh: r.labo_ch||{}, pdv: r.pdv||{} }); });
     const key = appRow.active_mois || moisKey();
     let result = {
       laboCats: appRow.labo_cats?.length ? appRow.labo_cats : DEFAULT_LABO_CATS.map(c=>({...c})),
@@ -1061,7 +1070,7 @@ function AppPatron({data,setData,onLogout}){
   const [menu,setMenu]=useState(false);
   const key=data.active;
   const [an,mi]=key.split("-").map(Number);
-  const getMois=()=>data.mois[key]||initMois();
+  const getMois=()=>fillPdvKeys(data.mois[key]||initMois());
   const md=getMois();
   const upd=nm=>setData(prev=>{
     const u={...prev,mois:{...prev.mois,[key]:nm}};
