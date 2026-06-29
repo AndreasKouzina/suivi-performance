@@ -1071,6 +1071,121 @@ function ImportCSV({data, md, onApplied}){
 }
 
 // ─── CLÔTURES DU JOUR (vue patron) ───────────────────────────────────────────
+// ─── PANNEAU DÉPENSES (saisie manuelle par le patron) ────────────────────────
+function PanneauDepenses({data, md, onUpdateMois}){
+  const [form,setForm]=useState({montant:"",modeId:data.paiements[0]?.id||"",scope:"labo",pdvId:PDV_LIST[0]?.id,catId:data.laboCats[0]?.id});
+
+  const catsDisponibles = form.scope==="labo" ? data.laboCats : (data.pdvCats[form.pdvId]||[]);
+
+  const ajouter = ()=>{
+    if(!n(form.montant)) return;
+    const cat = catsDisponibles.find(c=>c.id===form.catId) || catsDisponibles[0];
+    const mode = data.paiements.find(p=>p.id===form.modeId);
+    const pdvInfo = PDV_LIST.find(p=>p.id===form.pdvId);
+    const montant = n(form.montant);
+
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(form.scope==="labo"){
+      laboCh[cat.id] = n(laboCh[cat.id]) + montant;
+    } else {
+      const pm = pdvObj[form.pdvId];
+      pdvObj = {...pdvObj, [form.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+montant)}}};
+    }
+    const log = {
+      id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
+      vendeurNom:"Patron (saisie manuelle)", pdvId:form.scope==="pdv"?form.pdvId:null,
+      pdvLabel:form.scope==="pdv"?pdvInfo?.full:null,
+      montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
+    };
+    pdvObj = {...pdvObj, _depenses:[...(md.pdv._depenses||[]), log]};
+
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
+    setForm({...form, montant:""});
+  };
+
+  const supprimer = (dep)=>{
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(dep.scope==="labo"){
+      laboCh[dep.catId] = Math.max(0, n(laboCh[dep.catId]) - dep.montant);
+    } else {
+      const pm = pdvObj[dep.pdvId];
+      if(pm) pdvObj = {...pdvObj, [dep.pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:Math.max(0,n(pm.vars?.[dep.catId])-dep.montant)}}};
+    }
+    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).filter(d=>d.id!==dep.id)};
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
+  };
+
+  const toutesDepenses = [...(md.pdv._depenses||[])].reverse();
+  const totalMois = toutesDepenses.reduce((s,d)=>s+n(d.montant),0);
+
+  return <div>
+    <Card style={{marginBottom:20}}>
+      <SectionHead>➕ Ajouter une dépense manuelle</SectionHead>
+      <div style={{fontSize:12,color:C.textMuted,marginBottom:14}}>Pour les dépenses en espèces ou non visibles dans le relevé bancaire.</div>
+
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div>
+          <Label>Montant</Label>
+          <MoneyInput value={form.montant} onChange={v=>setForm({...form,montant:v})}/>
+        </div>
+        <div>
+          <Label>Mode de paiement</Label>
+          <select value={form.modeId} onChange={e=>setForm({...form,modeId:e.target.value})}
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+            {data.paiements.map(p=><option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label>Affecter à</Label>
+          <select value={form.scope==="labo"?"labo":`pdv:${form.pdvId}`}
+            onChange={e=>{
+              const v=e.target.value;
+              if(v==="labo") setForm({...form,scope:"labo",catId:data.laboCats[0]?.id});
+              else { const pdvId=v.split(":")[1]; setForm({...form,scope:"pdv",pdvId,catId:(data.pdvCats[pdvId]||[])[0]?.id}); }
+            }}
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+            <option value="labo">🏭 Laboratoire</option>
+            {PDV_LIST.map(p=><option key={p.id} value={`pdv:${p.id}`}>{p.emoji} {p.full}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label>Catégorie</Label>
+          <select value={form.catId} onChange={e=>setForm({...form,catId:e.target.value})}
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+            {catsDisponibles.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+          </select>
+        </div>
+        <button onClick={ajouter} disabled={!n(form.montant)}
+          style={{...base,background:n(form.montant)?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:10,padding:"12px",fontWeight:700,fontSize:14,cursor:n(form.montant)?"pointer":"not-allowed"}}>
+          + Ajouter la dépense
+        </button>
+      </div>
+    </Card>
+
+    <SectionHead>Dépenses du mois ({toutesDepenses.length}) {totalMois>0&&`· ${totalMois.toLocaleString("fr-FR")} €`}</SectionHead>
+    {toutesDepenses.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune dépense manuelle ce mois-ci</div></Card>}
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {toutesDepenses.map(dep=>(
+        <Card key={dep.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:13}}>{dep.catLabel} {dep.scope==="labo"?"· 🏭 Labo":`· ${dep.pdvLabel}`}</div>
+              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{dep.dateLabel} · {dep.vendeurNom} · {dep.modeLabel}</div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <strong style={{fontSize:15,color:C.accent}}>{n(dep.montant).toLocaleString("fr-FR")} €</strong>
+              <button onClick={()=>supprimer(dep)} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:7,padding:"6px 10px",cursor:"pointer",fontSize:12,fontWeight:600}}>Suppr.</button>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  </div>;
+}
+
+// ─── HISTORIQUE DES CLÔTURES + RÉCAP MODES DE PAIEMENT ───────────────────────
 function AllClotures({moisData}){
   const [filtreDate,setFiltreDate]=useState("");
 
@@ -1383,6 +1498,7 @@ function AppPatron({data,setData,onLogout}){
   const info=PDV_LIST.find(p=>p.id===page);
   const nav=[
     {id:"dashboard",label:"Dashboard",icon:"📊"},
+    {id:"depenses",label:"Dépenses",icon:"💸"},
     {id:"clotures",label:"Clôtures",icon:"📋"},
     {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
@@ -1414,7 +1530,7 @@ function AppPatron({data,setData,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","clotures","import","labo","vendeurs","paiements"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -1428,11 +1544,12 @@ function AppPatron({data,setData,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
         {page==="dashboard"&&<Dashboard data={data} moisData={md}/>}
+        {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd}/>}
         {page==="clotures"&&<AllClotures moisData={md}/>}
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
