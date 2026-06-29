@@ -1409,7 +1409,8 @@ function PanneauPDV({pdvMois,onPdvChange,pdvCats,onPdvCatChange,tLabo,info,pct})
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({data,moisData}){
+function Dashboard({data,moisData,onUpdateMois}){
+  const [montantEvent,setMontantEvent]=useState("");
   const tL=totalLabo(data.laboCats,moisData.laboCh);
   const rep=repartition(moisData.pdv);
   const pdvs=PDV_LIST.map(p=>({...p,c:calcPDV(moisData.pdv[p.id],data.pdvCats[p.id],rep[p.id],tL)}));
@@ -1424,6 +1425,13 @@ function Dashboard({data,moisData}){
   const today=todayKey();
   const cloturesDuJour=PDV_LIST.flatMap(p=>(moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today));
 
+  const ajouterEvenementiel=()=>{
+    if(!n(montantEvent)) return;
+    const ev = moisData.pdv.evenementiel||{ca:0};
+    onUpdateMois({...moisData, pdv:{...moisData.pdv, evenementiel:{ca:(n(ev.ca)+n(montantEvent))}}});
+    setMontantEvent("");
+  };
+
   return <div>
     {cloturesDuJour.length>0&&<Card style={{background:C.primaryLight,border:`1px solid ${C.primaryMuted}`,marginBottom:20}} pad={14}>
       <div style={{fontSize:12,fontWeight:700,color:C.primary,marginBottom:4}}>✅ {cloturesDuJour.length} clôture{cloturesDuJour.length>1?"s":""} saisie{cloturesDuJour.length>1?"s":""} aujourd'hui</div>
@@ -1435,12 +1443,19 @@ function Dashboard({data,moisData}){
       <KPICard label="Résultat net" value={`${tNet.toLocaleString("fr-FR")} €`} sub={<Badge val={tCA>0?tNet/tCA*100:0}/>} color={tNet>=0?C.green:C.red}/>
       <KPICard label="Charges labo" value={`${tL.toLocaleString("fr-FR")} €`} color={C.accent}/>
     </div>
-    {caEvenementiel>0 && <Card style={{background:C.fixeLight,marginBottom:20}} pad={14}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+    <Card style={{background:C.fixeLight,marginBottom:20}} pad={16}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:caEvenementiel>0?12:0,flexWrap:"wrap",gap:8}}>
         <div style={{fontSize:13,fontWeight:700,color:C.fixe}}>🎉 CA Événementiel ce mois</div>
         <div style={{fontSize:18,fontWeight:800,color:C.fixe}}>{caEvenementiel.toLocaleString("fr-FR")} €</div>
       </div>
-    </Card>}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:140}}><MoneyInput value={montantEvent} onChange={setMontantEvent}/></div>
+        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)}
+          style={{...base,background:n(montantEvent)?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)?"pointer":"not-allowed"}}>
+          + Ajouter un encaissement événementiel
+        </button>
+      </div>
+    </Card>
     <SectionHead>Classement des points de vente</SectionHead>
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       {sorted.map((p,i)=>{
@@ -1548,7 +1563,7 @@ function AppPatron({data,setData,onLogout}){
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
-        {page==="dashboard"&&<Dashboard data={data} moisData={md}/>}
+        {page==="dashboard"&&<Dashboard data={data} moisData={md} onUpdateMois={upd}/>}
         {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd}/>}
         {page==="clotures"&&<AllClotures moisData={md}/>}
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
