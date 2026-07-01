@@ -1387,6 +1387,11 @@ function ChargesList({cats,onCatChange,varsMois,onVarsChange,title,addLabel="+ A
               <Label>{isF?"Montant fixe (tous les mois)":"Montant ce mois"}</Label>
               {isF?<MoneyInput value={cat.montantFixe} onChange={v=>updCat(cat.id,"montantFixe",v)}/>:<MoneyInput value={varsMois?.[cat.id]} onChange={v=>updVar(cat.id,v)}/>}
             </div>
+            {isF && <div style={{flex:1,minWidth:120}}>
+              <Label>Supplément ce mois</Label>
+              <MoneyInput value={varsMois?.[cat.id]} onChange={v=>updVar(cat.id,v)}/>
+              {n(varsMois?.[cat.id])>0 && <div style={{fontSize:10,color:C.fixe,marginTop:3}}>Total : {(n(cat.montantFixe)+n(varsMois?.[cat.id])).toLocaleString("fr-FR")} €</div>}
+            </div>}
             <div style={{flexShrink:0}}><Label>Type</Label><TypeToggle value={cat.type} onChange={v=>updCat(cat.id,"type",v)}/></div>
           </div>
           {isF&&<div style={{marginTop:8,fontSize:11,color:C.fixe,background:"rgba(59,91,219,0.08)",borderRadius:6,padding:"3px 8px",display:"inline-block"}}>✓ Reporté automatiquement chaque mois</div>}
