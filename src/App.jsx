@@ -274,7 +274,13 @@ async function markRowsImported(rows){
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
-function montantCat(cat, vars){ return cat.type==="fixe" ? n(cat.montantFixe) : n(vars?.[cat.id]); }
+// Pour les charges fixes : montantFixe (récurrent) + vars[id] (dépenses ponctuelles supplémentaires)
+// Pour les charges variables : vars[id] uniquement (saisi chaque mois)
+function montantCat(cat, vars){ 
+  return cat.type==="fixe" 
+    ? n(cat.montantFixe) + n(vars?.[cat.id])
+    : n(vars?.[cat.id]); 
+}
 function totalLabo(cats, ch){ return cats.reduce((s,c)=>s+montantCat(c,ch),0); }
 function totalDirect(cats, vars){ return cats.reduce((s,c)=>s+montantCat(c,vars),0); }
 function repartition(moisPdv){
@@ -1186,15 +1192,18 @@ function PanneauDepenses({data, md, onUpdateMois}){
 }
 
 // ─── HISTORIQUE DES CLÔTURES + RÉCAP MODES DE PAIEMENT ───────────────────────
-function AllClotures({moisData}){
+function AllClotures({moisData, onUpdateMois}){
   const [filtreDate,setFiltreDate]=useState("");
+  const [editing,setEditing]=useState(null); // clôture en cours de modification
+  const [editModes,setEditModes]=useState([]);
+  const [editNote,setEditNote]=useState("");
 
   const entries=[];
   PDV_LIST.forEach(p=>{
     (moisData.pdv[p.id]?.clotures||[]).forEach(c=>entries.push({...c,pdvFull:p.full,pdvEmoji:p.emoji}));
   });
 
-  // Récap par mode de paiement, sur tout le mois affiché
+  // Récap par mode de paiement
   const recapModes={};
   entries.forEach(c=>{
     c.modes.forEach(m=>{
@@ -1205,14 +1214,70 @@ function AllClotures({moisData}){
   const totalGlobal = Object.values(recapModes).reduce((a,b)=>a+b,0);
   const depensesVendeurs = moisData.pdv._depenses||[];
 
-  // Filtre optionnel par date (format JJ/MM ou texte libre sur dateLabel/vendeur/point de vente)
+  // Filtre
   const filtered = filtreDate.trim()
-    ? entries.filter(c => c.dateLabel.includes(filtreDate.trim()) || c.pdvFull.toLowerCase().includes(filtreDate.trim().toLowerCase()) || c.vendeurNom.toLowerCase().includes(filtreDate.trim().toLowerCase()))
+    ? entries.filter(c=>c.dateLabel.includes(filtreDate.trim())||c.pdvFull.toLowerCase().includes(filtreDate.trim().toLowerCase())||c.vendeurNom.toLowerCase().includes(filtreDate.trim().toLowerCase()))
     : entries;
-  const sorted = [...filtered].sort((a,b)=> b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  const sorted = [...filtered].sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
+
+  // Ouvrir le formulaire de modification
+  const ouvrirEdition=(c)=>{
+    setEditing(c);
+    setEditModes(c.modes.map(m=>({...m})));
+    setEditNote(c.note||"");
+  };
+
+  // Sauvegarder la clôture modifiée
+  const sauvegarderEdition=()=>{
+    const newTotal = editModes.reduce((s,m)=>s+n(m.montant),0);
+    const updatedCloture = {...editing, modes:editModes, note:editNote, total:newTotal};
+    const pdvId = editing.pdvId;
+    const pdvMois = moisData.pdv[pdvId];
+    const newClotures = (pdvMois.clotures||[]).map(c=>c.id===editing.id?updatedCloture:c);
+    const newCa = caDepuisClotures(newClotures);
+    const newPdv = {...moisData.pdv, [pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+    onUpdateMois({...moisData, pdv:newPdv});
+    setEditing(null);
+  };
+
+  // Supprimer une clôture
+  const supprimerCloture=(c)=>{
+    const pdvMois = moisData.pdv[c.pdvId];
+    const newClotures = (pdvMois.clotures||[]).filter(x=>x.id!==c.id);
+    const newCa = caDepuisClotures(newClotures);
+    const newPdv = {...moisData.pdv, [c.pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+    onUpdateMois({...moisData, pdv:newPdv});
+  };
 
   return <div>
-    {/* Récap par mode de paiement */}
+    {/* Modal de modification */}
+    {editing && <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <Card style={{width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} pad={20}>
+        <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>✏️ Modifier la clôture</div>
+        <div style={{fontSize:12,color:C.textMuted,marginBottom:16}}>{editing.pdvEmoji} {editing.pdvFull} · {editing.dateLabel} · par {editing.vendeurNom}</div>
+        {editModes.map((m,i)=>(
+          <div key={m.id} style={{marginBottom:12}}>
+            <Label>{m.label}</Label>
+            <MoneyInput value={m.montant} onChange={v=>setEditModes(ms=>ms.map((x,j)=>j===i?{...x,montant:v}:x))}/>
+          </div>
+        ))}
+        <div style={{marginBottom:16}}>
+          <Label>Note</Label>
+          <input value={editNote} onChange={e=>setEditNote(e.target.value)} placeholder="Note optionnelle…"
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+        </div>
+        <div style={{background:C.primaryLight,borderRadius:8,padding:"10px 14px",marginBottom:16,display:"flex",justifyContent:"space-between"}}>
+          <span style={{fontSize:13,color:C.primary,fontWeight:600}}>Nouveau total</span>
+          <span style={{fontSize:16,fontWeight:800,color:C.primary}}>{editModes.reduce((s,m)=>s+n(m.montant),0).toLocaleString("fr-FR")} €</span>
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={()=>setEditing(null)} style={{...base,flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px",fontWeight:600,cursor:"pointer",color:C.textMuted}}>Annuler</button>
+          <button onClick={sauvegarderEdition} style={{...base,flex:2,background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"11px",fontWeight:700,cursor:"pointer"}}>Enregistrer</button>
+        </div>
+      </Card>
+    </div>}
+
+    {/* Récap paiements */}
     <Card style={{background:C.primary,marginBottom:20}} pad={18}>
       <div style={{fontSize:11,fontWeight:600,color:"rgba(255,255,255,0.65)",letterSpacing:0.8,textTransform:"uppercase",marginBottom:8}}>Récap par mode de paiement — ce mois</div>
       {totalGlobal>0 ? (
@@ -1263,7 +1328,12 @@ function AllClotures({moisData}){
               <div style={{fontWeight:600,fontSize:14}}>{c.pdvEmoji} {c.pdvFull}</div>
               <div style={{fontSize:12,color:C.textMuted}}>par {c.vendeurNom} · {c.dateLabel}</div>
             </div>
-            <div style={{fontWeight:700,fontSize:18,color:C.primary}}>{n(c.total).toLocaleString("fr-FR")} €</div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{fontWeight:700,fontSize:18,color:C.primary}}>{n(c.total).toLocaleString("fr-FR")} €</div>
+              <button onClick={()=>ouvrirEdition(c)} style={{...base,background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:500,color:C.textMuted}}>✏️ Modifier</button>
+              <button onClick={()=>{ if(window.confirm("Supprimer cette clôture ?")) supprimerCloture(c); }}
+                style={{...base,background:C.redLight,border:"none",borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:500,color:C.red}}>✕</button>
+            </div>
           </div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             {c.modes.filter(m=>n(m.montant)>0).map(m=>(
@@ -1565,7 +1635,7 @@ function AppPatron({data,setData,onLogout}){
         </div>
         {page==="dashboard"&&<Dashboard data={data} moisData={md} onUpdateMois={upd}/>}
         {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd}/>}
-        {page==="clotures"&&<AllClotures moisData={md}/>}
+        {page==="clotures"&&<AllClotures moisData={md} onUpdateMois={upd}/>}
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
