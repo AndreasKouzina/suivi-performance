@@ -91,7 +91,21 @@ function ensureMois(data, key){
   return {...data, mois:{...data.mois,[key]:initMois()}};
 }
 
-// Migration ponctuelle des catégories labo : ajoute Carburant/Packaging, retire Gaz
+// Réconcilie les dépenses du journal (_depenses) avec les vars des PDV
+// Utile si des dépenses ont été loggées mais pas correctement appliquées aux vars
+function reconcilierDepenses(moisObj){
+  const depenses = moisObj.pdv._depenses || [];
+  if(depenses.length===0) return moisObj;
+
+  // Recalcule les vars uniquement depuis les sources fiables :
+  // 1. On ne touche pas aux vars existants qui viennent du CSV ou de l'onglet Dépenses patron
+  // 2. On s'assure juste que chaque dépense vendeur est reflétée
+  // Méthode : on compare ce qui devrait être dans vars vs ce qui y est
+  // Pour éviter les doubles comptages, on ne fait rien ici — les dépenses
+  // vendeur sont déjà appliquées au moment de la saisie.
+  // Ce flag est juste pour s'assurer que fillPdvKeys initialise bien les vars.
+  return moisObj;
+}
 function migrateLaboCats(data){
   let cats = (data.laboCats||[]).filter(c=>c.id!=="gaz");
   let changed = cats.length !== (data.laboCats||[]).length;
@@ -456,17 +470,24 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const pdvCatsActuel = pdvId ? (data.pdvCats[pdvId]||[]) : [];
 
   const startSaisie=(id)=>{
+    const cats = data.pdvCats[id] || DEFAULT_PDV_CATS;
     setPdvId(id);
     setModes(data.paiements.map(p=>({...p,montant:0})));
     setDepenses([]);
-    setDepForm({montant:"",modeId:data.paiements[0]?.id||"",scope:"pdv",catId:(data.pdvCats[id]||[])[0]?.id||""});
+    setDepForm({
+      montant:"",
+      modeId:data.paiements[0]?.id||"",
+      scope:"pdv",
+      catId:cats[0]?.id||data.laboCats[0]?.id||""
+    });
     setStep("saisie");
   };
 
   const ajouterDepense=()=>{
     if(!n(depForm.montant)) return;
-    const cats = depForm.scope==="labo" ? data.laboCats : pdvCatsActuel;
+    const cats = depForm.scope==="labo" ? data.laboCats : (pdvCatsActuel.length>0 ? pdvCatsActuel : DEFAULT_PDV_CATS);
     const cat = cats.find(c=>c.id===depForm.catId) || cats[0];
+    if(!cat) return;
     const mode = data.paiements.find(p=>p.id===depForm.modeId);
     setDepenses(ds=>[...ds, {
       id:uid(), montant:n(depForm.montant), modeLabel:mode?.label||"—",
@@ -497,13 +518,24 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
       if(dep.scope==="labo"){
         laboCh[dep.catId] = n(laboCh[dep.catId]) + dep.montant;
       } else {
-        const pm = pdvObj[pdvId];
-        pdvObj = {...pdvObj, [pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:(n(pm.vars?.[dep.catId])+dep.montant)}}};
+        // Relire pdvObj[pdvId] à chaque itération pour éviter les écrasements
+        const pmActuel = pdvObj[pdvId] || {ca:0,vars:{},clotures:[]};
+        const varsActuels = pmActuel.vars || {};
+        pdvObj = {
+          ...pdvObj,
+          [pdvId]: {
+            ...pmActuel,
+            vars: {
+              ...varsActuels,
+              [dep.catId]: n(varsActuels[dep.catId]) + dep.montant
+            }
+          }
+        };
       }
       depLog.push({
         id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
         vendeurNom:vendeur.nom, pdvId, pdvLabel:pdvInfo?.full,
-        montant:dep.montant, modeLabel:dep.modeLabel, scope:dep.scope, catLabel:dep.catLabel
+        montant:dep.montant, modeLabel:dep.modeLabel, scope:dep.scope, catLabel:dep.catLabel, catId:dep.catId
       });
     });
     if(depLog.length>0) pdvObj = {...pdvObj, _depenses:[...(mois.pdv._depenses||[]), ...depLog]};
