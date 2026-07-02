@@ -465,6 +465,8 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const [depenses,setDepenses]=useState([]); // dépenses ajoutées par le vendeur, n'affectent pas le CA
   const [depForm,setDepForm]=useState({montant:"",modeId:"",scope:"pdv",catId:""});
 
+  const [saving,setSaving]=useState(false);
+
   const pdvInfo=PDV_LIST.find(p=>p.id===pdvId);
   const total=modes.reduce((s,m)=>s+n(m.montant),0);
   const pdvCatsActuel = pdvId ? (data.pdvCats[pdvId]||[]) : [];
@@ -497,16 +499,21 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   };
   const supprimerDepense=(id)=>setDepenses(ds=>ds.filter(d=>d.id!==id));
 
-  const valider=()=>{
+  const valider=async ()=>{
+    setSaving(true);
     const key=moisKey();
-    const d=ensureMois(data,key);
+    // Recharger les données fraîches depuis Supabase avant d'écrire
+    // pour éviter d'écraser des données plus récentes
+    const remote = await loadFromSupabase();
+    const baseData = remote || data;
+    const d = ensureMois(baseData, key);
     const cloture={
       id:uid(), vendeurId:vendeur.id, vendeurNom:vendeur.nom,
       pdvId, date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
       modes:modes.map(m=>({...m})), total, note
     };
     let mois = d.mois[key];
-    const old=mois.pdv[pdvId];
+    const old = mois.pdv[pdvId] || {ca:0,vars:{},clotures:[]};
     const clotures=[...(old.clotures||[]),cloture];
     const ca=caDepuisClotures(clotures);
     let pdvObj = {...mois.pdv, [pdvId]: {...old, ca, clotures}};
@@ -518,7 +525,6 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
       if(dep.scope==="labo"){
         laboCh[dep.catId] = n(laboCh[dep.catId]) + dep.montant;
       } else {
-        // Relire pdvObj[pdvId] à chaque itération pour éviter les écrasements
         const pmActuel = pdvObj[pdvId] || {ca:0,vars:{},clotures:[]};
         const varsActuels = pmActuel.vars || {};
         pdvObj = {
@@ -543,6 +549,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
     mois = {...mois, pdv:pdvObj, laboCh};
     const newData={...d, mois:{...d.mois,[key]:mois}};
     onSave(newData);
+    setSaving(false);
     setStep("confirm");
   };
 
@@ -686,9 +693,9 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
           </div>
         </Card>
 
-        <button onClick={valider} disabled={total===0}
-          style={{...base,width:"100%",background:total>0?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0?"pointer":"not-allowed",transition:"background 0.15s"}}>
-          Valider la clôture{depenses.length>0?` (+${depenses.length} dépense${depenses.length>1?"s":""})`:""}
+        <button onClick={valider} disabled={total===0||saving}
+          style={{...base,width:"100%",background:total>0&&!saving?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0&&!saving?"pointer":"not-allowed",transition:"background 0.15s"}}>
+          {saving?"⏳ Enregistrement...":`Valider la clôture${depenses.length>0?` (+${depenses.length} dépense${depenses.length>1?"s":""})`:""}`}
         </button>
       </div>
     </div>
