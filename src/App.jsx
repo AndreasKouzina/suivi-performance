@@ -501,6 +501,17 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
   const valider=async ()=>{
     setSaving(true);
+    // Si le vendeur a saisi un montant mais n'a pas cliqué "+ Ajouter", on l'ajoute automatiquement
+    let depensesFinales = [...depenses];
+    if(n(depForm.montant)>0){
+      const cats = depForm.scope==="labo" ? data.laboCats : (pdvCatsActuel.length>0 ? pdvCatsActuel : DEFAULT_PDV_CATS);
+      const cat = cats.find(c=>c.id===depForm.catId) || cats[0];
+      const mode = data.paiements.find(p=>p.id===depForm.modeId);
+      if(cat) depensesFinales = [...depensesFinales, {
+        id:uid(), montant:n(depForm.montant), modeLabel:mode?.label||"—",
+        scope:depForm.scope, catId:cat?.id, catLabel:cat?.label||"Autre"
+      }];
+    }
     const key=moisKey();
     // Recharger les données fraîches depuis Supabase avant d'écrire
     // pour éviter d'écraser des données plus récentes
@@ -521,7 +532,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
     // Applique les dépenses déclarées — sans toucher au CA
     const depLog=[];
-    depenses.forEach(dep=>{
+    depensesFinales.forEach(dep=>{
       if(dep.scope==="labo"){
         laboCh[dep.catId] = n(laboCh[dep.catId]) + dep.montant;
       } else {
@@ -695,7 +706,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
         <button onClick={valider} disabled={total===0||saving}
           style={{...base,width:"100%",background:total>0&&!saving?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0&&!saving?"pointer":"not-allowed",transition:"background 0.15s"}}>
-          {saving?"⏳ Enregistrement...":`Valider la clôture${depenses.length>0?` (+${depenses.length} dépense${depenses.length>1?"s":""})`:""}`}
+          {saving?"⏳ Enregistrement...":(()=>{const tot=depenses.length+(n(depForm.montant)>0?1:0);return `Valider la clôture${tot>0?` (+${tot} dépense${tot>1?"s":""})`:""}`;})()}
         </button>
       </div>
     </div>
@@ -873,7 +884,17 @@ function ImportCSV({data, md, onApplied}){
     const ops=[...reconnues.map(c=>({...c.auto, libelle:c.row.libelle}))];
     for(const c of aClasser){
       const choix=pending[c.row.id];
-      if(choix && choix.type!=="ignore"){
+      if(!choix || choix.type==="ignore") continue;
+      if(choix.type==="multi"){
+        // Répartition multi-PDV : une op par point de vente avec son montant spécifique
+        (choix.repartition||[]).forEach(r=>{
+          if(n(r.montant)>0){
+            const cats=data.pdvCats[r.pdvId]||[];
+            const cat=cats.find(ct=>ct.id===r.catId)||cats[0];
+            ops.push({ type:"pdv", pdvId:r.pdvId, catId:r.catId, label:cat?.label||"", montant:n(r.montant), lissage:choix.lissage||"ponctuel", libelle:c.row.libelle });
+          }
+        });
+      } else {
         ops.push({...choix, montant:c.row.debit, libelle:c.row.libelle, _learnKeyword:c.k.clean});
       }
     }
@@ -1025,21 +1046,28 @@ function ImportCSV({data, md, onApplied}){
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
         {aClasser.map(c=>{
           const choix=pending[c.row.id]||{type:"ignore"};
+          const isMulti = choix.type==="multi";
           return <div key={c.row.id} style={{background:C.bg,borderRadius:10,padding:12}}>
             <div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{c.row.libelle}</div>
             <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>{c.row.dateOp} · {c.row.debit.toLocaleString("fr-FR")} €</div>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <select value={choix.type==="labo"?"labo":choix.type==="pdv"?`pdv:${choix.pdvId}`:"ignore"}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:isMulti?10:0}}>
+              <select value={choix.type==="labo"?"labo":choix.type==="pdv"?`pdv:${choix.pdvId}`:choix.type==="multi"?"multi":"ignore"}
                 onChange={e=>{
                   const v=e.target.value;
                   if(v==="ignore") setPend(c.row.id,{type:"ignore"});
                   else if(v==="labo") setPend(c.row.id,{type:"labo",catId:allCatsLabo[0]?.id,label:allCatsLabo[0]?.label,lissage:"ponctuel"});
+                  else if(v==="multi"){
+                    // Initialise avec tous les PDV à 0
+                    const repartition=PDV_LIST.map(p=>({pdvId:p.id,montant:"",catId:(data.pdvCats[p.id]||[])[0]?.id}));
+                    setPend(c.row.id,{type:"multi",repartition,lissage:"ponctuel"});
+                  }
                   else { const pdvId=v.split(":")[1]; const cats=data.pdvCats[pdvId]||[]; setPend(c.row.id,{type:"pdv",pdvId,catId:cats[0]?.id,label:cats[0]?.label,lissage:"ponctuel"}); }
                 }}
                 style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
                 <option value="ignore">Ignorer</option>
                 <option value="labo">🏭 Charge du Labo</option>
                 {PDV_LIST.map(p=><option key={p.id} value={`pdv:${p.id}`}>{p.emoji} {p.nom}</option>)}
+                <option value="multi">🔀 Répartir sur plusieurs PDV</option>
               </select>
 
               {choix.type==="labo" && <select value={choix.catId} onChange={e=>{const cat=allCatsLabo.find(c2=>c2.id===e.target.value);setPend(c.row.id,{...choix,catId:cat.id,label:cat.label});}}
@@ -1052,13 +1080,62 @@ function ImportCSV({data, md, onApplied}){
                 {(data.pdvCats[choix.pdvId]||[]).map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
               </select>}
 
-              {choix.type!=="ignore" && <select value={choix.lissage||"ponctuel"} onChange={e=>setPend(c.row.id,{...choix,lissage:e.target.value})}
+              {choix.type!=="ignore" && choix.type!=="multi" && <select value={choix.lissage||"ponctuel"} onChange={e=>setPend(c.row.id,{...choix,lissage:e.target.value})}
                 style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
                 <option value="ponctuel">Ponctuel (ce mois)</option>
                 <option value="trimestriel">Trimestriel (÷3)</option>
                 <option value="annuel">Annuel (÷12)</option>
               </select>}
             </div>
+
+            {/* Interface multi-PDV */}
+            {isMulti && <div style={{background:C.white,borderRadius:8,padding:10,border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>
+                Saisissez le montant pour chaque point de vente concerné (total : {c.row.debit.toLocaleString("fr-FR")} €) — laissez 0 pour les autres.
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {choix.repartition.map((r,ri)=>{
+                  const cats=data.pdvCats[r.pdvId]||[];
+                  const pdv=PDV_LIST.find(p=>p.id===r.pdvId);
+                  if(!pdv) return null;
+                  return <div key={r.pdvId} style={{display:"grid",gridTemplateColumns:"1fr 120px 140px",gap:8,alignItems:"center"}}>
+                    <div style={{fontSize:12,fontWeight:500}}>{pdv.emoji} {pdv.nom}</div>
+                    <div style={{position:"relative"}}>
+                      <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:11}}>€</span>
+                      <input type="number" min="0" step="0.01" value={r.montant||""} placeholder="0"
+                        onChange={e=>{
+                          const newRep=choix.repartition.map((x,xi)=>xi===ri?{...x,montant:e.target.value}:x);
+                          setPend(c.row.id,{...choix,repartition:newRep});
+                        }}
+                        style={{...base,width:"100%",padding:"6px 8px 6px 22px",borderRadius:6,border:`1px solid ${C.border}`,fontSize:12,outline:"none"}}/>
+                    </div>
+                    <select value={r.catId} onChange={e=>{
+                        const newRep=choix.repartition.map((x,xi)=>xi===ri?{...x,catId:e.target.value}:x);
+                        setPend(c.row.id,{...choix,repartition:newRep});
+                      }}
+                      style={{...base,padding:"6px 8px",borderRadius:6,border:`1px solid ${C.border}`,fontSize:11}}>
+                      {cats.map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+                    </select>
+                  </div>;
+                })}
+              </div>
+              {/* Total saisi vs total réel */}
+              {(()=>{
+                const totalSaisi=choix.repartition.reduce((s,r)=>s+n(r.montant),0);
+                const reste=c.row.debit-totalSaisi;
+                return <div style={{marginTop:8,fontSize:11,fontWeight:600,color:Math.abs(reste)<0.01?C.green:C.accent}}>
+                  {Math.abs(reste)<0.01?"✅ Total correctement réparti":`⚠️ Reste à répartir : ${reste.toLocaleString("fr-FR")} €`}
+                </div>;
+              })()}
+              <div style={{marginTop:8}}>
+                <select value={choix.lissage||"ponctuel"} onChange={e=>setPend(c.row.id,{...choix,lissage:e.target.value})}
+                  style={{...base,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
+                  <option value="ponctuel">Ponctuel (ce mois)</option>
+                  <option value="trimestriel">Trimestriel (÷3)</option>
+                  <option value="annuel">Annuel (÷12)</option>
+                </select>
+              </div>
+            </div>}
           </div>;
         })}
       </div>
