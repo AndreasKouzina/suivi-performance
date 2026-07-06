@@ -49,7 +49,7 @@ const DEFAULT_PAIEMENTS = [
   { id:"especes", label:"Espèces" },
   { id:"ticket",  label:"Tickets resto" },
 ];
-const PATRON_PASSWORD = "patron2026";
+// Patrons gérés via Supabase (table patrons)
 
 // ─── PERSISTANCE (Supabase + cache local) ────────────────────────────────────
 const uid = () => "u"+Math.random().toString(36).slice(2,8);
@@ -285,6 +285,48 @@ async function markRowsImported(rows){
   }catch(err){ console.error("mark imported error",err); }
 }
 
+// ─── AUTHENTIFICATION PATRONS ─────────────────────────────────────────────────
+async function loginPatron(password){
+  try{
+    const { data, error } = await supabase.from("patrons").select("*").eq("password_hash", password);
+    if(error || !data || data.length===0) return null;
+    const patron = data[0];
+    // Mise à jour du last_login
+    await supabase.from("patrons").update({ last_login: new Date().toISOString() }).eq("id", patron.id);
+    return patron;
+  }catch(err){ console.error("login patron error",err); return null; }
+}
+
+async function updatePatronPassword(patronId, newPassword){
+  try{
+    await supabase.from("patrons").update({ password_hash: newPassword }).eq("id", patronId);
+    return true;
+  }catch(err){ console.error("update password error",err); return false; }
+}
+
+// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
+async function logActivity(patron, action, detail={}){
+  try{
+    await supabase.from("activity_log").insert({
+      id: uid(),
+      patron_id: patron.id,
+      patron_nom: patron.nom,
+      action,
+      detail,
+      created_at: new Date().toISOString()
+    });
+  }catch(err){ console.error("log activity error",err); }
+}
+
+async function loadActivityLog(limit=100){
+  try{
+    const { data, error } = await supabase.from("activity_log")
+      .select("*").order("created_at", {ascending:false}).limit(limit);
+    if(error) return [];
+    return data||[];
+  }catch(err){ console.error("load activity log error",err); return []; }
+}
+
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
@@ -379,13 +421,18 @@ function TypeToggle({value,onChange}){
 
 // ─── ÉCRAN DE CONNEXION ───────────────────────────────────────────────────────
 function EcranConnexion({onPatron, onVendeur, vendeurs}){
-  const [mode,setMode]=useState(null); // null | "patron" | "vendeur"
+  const [mode,setMode]=useState(null);
   const [pin,setPin]=useState("");
   const [pwd,setPwd]=useState("");
   const [err,setErr]=useState("");
+  const [loading,setLoading]=useState(false);
 
-  const loginPatron=()=>{
-    if(pwd===PATRON_PASSWORD){ onPatron(); }
+  const handleLoginPatron=async()=>{
+    if(!pwd.trim()) return;
+    setLoading(true); setErr("");
+    const patron = await loginPatron(pwd);
+    setLoading(false);
+    if(patron){ onPatron(patron); }
     else{ setErr("Mot de passe incorrect"); setPwd(""); }
   };
   const loginVendeur=()=>{
@@ -395,7 +442,7 @@ function EcranConnexion({onPatron, onVendeur, vendeurs}){
   };
   const addPin=(d)=>{
     if(mode==="vendeur"&&pin.length<6) setPin(p=>p+d);
-    if(mode==="patron"&&pwd.length<20) setPwd(p=>p+d);
+    if(mode==="patron"&&pwd.length<30) setPwd(p=>p+d);
   };
   const delPin=()=>{ if(mode==="vendeur") setPin(p=>p.slice(0,-1)); else setPwd(p=>p.slice(0,-1)); };
 
@@ -442,14 +489,14 @@ function EcranConnexion({onPatron, onVendeur, vendeurs}){
             ))}
           </div>
           :<div style={{marginBottom:16}}>
-            <input type="password" value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Mot de passe" onKeyDown={e=>e.key==="Enter"&&loginPatron()}
+            <input type="password" value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Mot de passe" onKeyDown={e=>e.key==="Enter"&&handleLoginPatron()}
               style={{...base,width:"100%",padding:"12px 14px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:15,textAlign:"center"}}/>
           </div>
         }
         {err&&<div style={{textAlign:"center",color:C.red,fontSize:13,marginBottom:12,fontWeight:500}}>{err}</div>}
-        <button onClick={mode==="vendeur"?loginVendeur:loginPatron}
-          style={{...base,width:"100%",background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:15,cursor:"pointer"}}>
-          Connexion
+        <button onClick={mode==="vendeur"?loginVendeur:handleLoginPatron} disabled={loading}
+          style={{...base,width:"100%",background:loading?"#ccc":C.primary,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:15,cursor:loading?"not-allowed":"pointer"}}>
+          {loading?"⏳ Vérification...":"Connexion"}
         </button>
       </Card>}
     </div>
@@ -1676,7 +1723,108 @@ function Dashboard({data,moisData,onUpdateMois}){
 }
 
 // ─── APP PATRON ───────────────────────────────────────────────────────────────
-function AppPatron({data,setData,onLogout}){
+
+// ─── MON COMPTE (changement de mot de passe) ─────────────────────────────────
+function MonCompte({patron, onLogout}){
+  const [pwd,setPwd]=useState("");
+  const [pwd2,setPwd2]=useState("");
+  const [msg,setMsg]=useState(null);
+  const [loading,setLoading]=useState(false);
+
+  const changer=async()=>{
+    if(pwd.length<6){ setMsg({ok:false,txt:"Mot de passe trop court (6 caractères minimum)"}); return; }
+    if(pwd!==pwd2){ setMsg({ok:false,txt:"Les deux mots de passe ne correspondent pas"}); return; }
+    setLoading(true);
+    const ok=await updatePatronPassword(patron.id, pwd);
+    await logActivity(patron,"mot_de_passe",{});
+    setLoading(false);
+    if(ok){ setMsg({ok:true,txt:"Mot de passe changé ! Reconnectez-vous avec votre nouveau mot de passe."}); setPwd(""); setPwd2(""); }
+    else{ setMsg({ok:false,txt:"Erreur lors du changement"}); }
+  };
+
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <div style={{fontSize:14,color:C.textMuted,marginBottom:16}}>Connecté en tant que <strong style={{color:C.primary}}>{patron.nom}</strong></div>
+      <SectionHead>🔑 Changer mon mot de passe</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div>
+          <Label>Nouveau mot de passe</Label>
+          <input type="password" value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Minimum 6 caractères"
+            style={{...base,width:"100%",padding:"10px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+        </div>
+        <div>
+          <Label>Confirmer le mot de passe</Label>
+          <input type="password" value={pwd2} onChange={e=>setPwd2(e.target.value)} placeholder="Répétez le mot de passe"
+            style={{...base,width:"100%",padding:"10px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+        </div>
+        {msg&&<div style={{fontSize:13,fontWeight:500,color:msg.ok?C.green:C.red,background:msg.ok?C.greenLight:C.redLight,borderRadius:8,padding:"8px 12px"}}>{msg.txt}</div>}
+        <button onClick={changer} disabled={loading||!pwd||!pwd2}
+          style={{...base,background:loading||!pwd||!pwd2?"#ccc":C.primary,color:"#fff",border:"none",borderRadius:10,padding:"12px",fontWeight:700,cursor:loading||!pwd||!pwd2?"not-allowed":"pointer"}}>
+          {loading?"⏳ Enregistrement...":"Changer le mot de passe"}
+        </button>
+      </div>
+    </Card>
+    <Card>
+      <SectionHead>🚪 Déconnexion</SectionHead>
+      <button onClick={onLogout} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:10,padding:"12px 20px",fontWeight:600,cursor:"pointer"}}>
+        Se déconnecter
+      </button>
+    </Card>
+  </div>;
+}
+
+// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
+function JournalActivite(){
+  const [logs,setLogs]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    loadActivityLog(200).then(data=>{ setLogs(data); setLoading(false); });
+  },[]);
+
+  const actionLabel={
+    connexion:"🔐 Connexion",
+    deconnexion:"🚪 Déconnexion",
+    import_csv:"📥 Import CSV",
+    depense_ajout:"💸 Dépense ajoutée",
+    depense_suppression:"🗑️ Dépense supprimée",
+    cloture_modif:"✏️ Clôture modifiée",
+    cloture_suppression:"🗑️ Clôture supprimée",
+    vendeur_ajout:"🧑‍💼 Vendeur ajouté",
+    vendeur_suppression:"🗑️ Vendeur supprimé",
+    mot_de_passe:"🔑 Mot de passe changé",
+  };
+
+  if(loading) return <Card pad={24}><div style={{color:C.textMuted,fontSize:13}}>Chargement du journal…</div></Card>;
+  if(logs.length===0) return <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune activité enregistrée</div></Card>;
+
+  return <div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {logs.map(log=>{
+        const date=new Date(log.created_at);
+        const dateStr=date.toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
+        const heureStr=date.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+        return <Card key={log.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:13}}>{actionLabel[log.action]||log.action}</div>
+              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>par <strong>{log.patron_nom}</strong> · {dateStr} à {heureStr}</div>
+              {Object.keys(log.detail||{}).length>0 && <div style={{marginTop:6,display:"flex",gap:6,flexWrap:"wrap"}}>
+                {Object.entries(log.detail).map(([k,v])=>(
+                  <span key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.textMuted}}>
+                    {k} : {typeof v==="number"?v.toLocaleString("fr-FR")+" €":String(v)}
+                  </span>
+                ))}
+              </div>}
+            </div>
+          </div>
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
+function AppPatron({data,setData,patron,onLogout}){
   const [page,setPage]=useState("dashboard");
   const [menu,setMenu]=useState(false);
   const key=data.active;
@@ -1711,6 +1859,8 @@ function AppPatron({data,setData,onLogout}){
     ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
+    {id:"journal",label:"Journal",icon:"📜"},
+    {id:"compte",label:"Mon compte",icon:"🔑"},
   ];
   return <div style={{...base,minHeight:"100vh",background:C.bg}}>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
@@ -1736,7 +1886,7 @@ function AppPatron({data,setData,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","journal","compte"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -1750,7 +1900,7 @@ function AppPatron({data,setData,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="journal"?"📜 Journal d'activité":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -1762,6 +1912,8 @@ function AppPatron({data,setData,onLogout}){
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
         {page==="import"&&<ImportCSV data={data} md={md} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
+        {page==="journal"&&<JournalActivite/>}
+        {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
       </div>
     </div>
   </div>;
@@ -1808,7 +1960,10 @@ export default function App(){
   // Écran de connexion toujours affiché si pas de session active
   if(!session) return (
     <EcranConnexion
-      onPatron={()=>setSession({role:"patron"})}
+      onPatron={async(patron)=>{
+        setSession({role:"patron", patron});
+        await logActivity(patron, "connexion", {});
+      }}
       onVendeur={v=>setSession({role:"vendeur",vendeur:v})}
       vendeurs={data.vendeurs}
     />
@@ -1827,7 +1982,8 @@ export default function App(){
     <AppPatron
       data={data}
       setData={d=>{ saveCache(d); saveAppDataToSupabase(d); setData(d); }}
-      onLogout={()=>setSession(null)}
+      patron={session.patron}
+      onLogout={async()=>{ await logActivity(session.patron,"deconnexion",{}); setSession(null); }}
     />
   );
 }
