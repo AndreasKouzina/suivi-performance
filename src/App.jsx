@@ -1724,6 +1724,140 @@ function Dashboard({data,moisData,onUpdateMois}){
 
 // ─── APP PATRON ───────────────────────────────────────────────────────────────
 
+// ─── CONTRÔLE CAISSE ──────────────────────────────────────────────────────────
+function ControleCaisse({moisData, paiements}){
+  // Modes hors CB (on exclut les modes contenant "cb" ou "carte")
+  const modesCash = paiements.filter(p=>!/cb|carte bancaire/i.test(p.label));
+
+  // 1. Encaissements depuis les clôtures vendeurs, par mode
+  const encaissements = {}; // { modeLabel: montant }
+  PDV_LIST.forEach(p=>{
+    (moisData.pdv[p.id]?.clotures||[]).forEach(cl=>{
+      cl.modes.forEach(m=>{
+        if(!/cb|carte bancaire/i.test(m.label) && n(m.montant)>0){
+          encaissements[m.label] = (encaissements[m.label]||0) + n(m.montant);
+        }
+      });
+    });
+  });
+  // CA événementiel — considéré comme encaissement espèces par défaut
+  const caEvent = n(moisData.pdv.evenementiel?.ca);
+
+  // 2. Dépenses payées en modes hors CB (depuis _depenses)
+  const depenses = {}; // { modeLabel: montant }
+  (moisData.pdv._depenses||[]).forEach(dep=>{
+    if(!/cb|carte bancaire/i.test(dep.modeLabel||"") && n(dep.montant)>0){
+      depenses[dep.modeLabel] = (depenses[dep.modeLabel]||0) + n(dep.montant);
+    }
+  });
+
+  // 3. Tous les modes détectés
+  const tousLesModes = [...new Set([
+    ...Object.keys(encaissements),
+    ...Object.keys(depenses),
+  ])];
+
+  const totalEncaisse = Object.values(encaissements).reduce((a,b)=>a+b,0) + caEvent;
+  const totalDepenses = Object.values(depenses).reduce((a,b)=>a+b,0);
+  const totalRestant = totalEncaisse - totalDepenses;
+
+  return <div>
+    {/* Total global */}
+    <Card style={{background:C.primary,marginBottom:20}} pad={20}>
+      <div style={{fontSize:11,fontWeight:600,color:"rgba(255,255,255,0.65)",letterSpacing:0.8,textTransform:"uppercase",marginBottom:6}}>
+        Espèces & BL à récupérer ce mois
+      </div>
+      <div style={{fontSize:40,fontWeight:800,color:"#fff",lineHeight:1}}>{totalRestant.toLocaleString("fr-FR")} €</div>
+      <div style={{display:"flex",gap:20,marginTop:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:12,color:"rgba(255,255,255,0.65)"}}>
+          Encaissé : <strong style={{color:"#fff"}}>{totalEncaisse.toLocaleString("fr-FR")} €</strong>
+        </div>
+        <div style={{fontSize:12,color:"rgba(255,255,255,0.65)"}}>
+          Dépensé : <strong style={{color:"#fff"}}>− {totalDepenses.toLocaleString("fr-FR")} €</strong>
+        </div>
+      </div>
+    </Card>
+
+    {/* Détail par mode de paiement */}
+    <SectionHead>Détail par mode de paiement</SectionHead>
+    <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
+      {tousLesModes.length===0 && caEvent===0 && (
+        <Card pad={24} style={{textAlign:"center"}}>
+          <div style={{color:C.textLight,fontSize:13}}>Aucune clôture saisie ce mois-ci</div>
+        </Card>
+      )}
+      {tousLesModes.map(mode=>{
+        const enc = (encaissements[mode]||0);
+        const dep = (depenses[mode]||0);
+        const restant = enc - dep;
+        return <Card key={mode} pad={16}>
+          <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>{mode}</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}}>
+            <div style={{flex:1,minWidth:100,background:C.greenLight,borderRadius:8,padding:"8px 12px"}}>
+              <div style={{fontSize:10,color:C.green,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>Encaissé</div>
+              <div style={{fontSize:18,fontWeight:700,color:C.green}}>{enc.toLocaleString("fr-FR")} €</div>
+            </div>
+            <div style={{flex:1,minWidth:100,background:C.redLight,borderRadius:8,padding:"8px 12px"}}>
+              <div style={{fontSize:10,color:C.red,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>Dépensé</div>
+              <div style={{fontSize:18,fontWeight:700,color:C.red}}>− {dep.toLocaleString("fr-FR")} €</div>
+            </div>
+            <div style={{flex:1,minWidth:100,background:restant>=0?C.primaryLight:C.redLight,borderRadius:8,padding:"8px 12px"}}>
+              <div style={{fontSize:10,color:restant>=0?C.primary:C.red,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>À récupérer</div>
+              <div style={{fontSize:18,fontWeight:700,color:restant>=0?C.primary:C.red}}>{restant.toLocaleString("fr-FR")} €</div>
+            </div>
+          </div>
+          {/* Barre de progression encaissé vs dépensé */}
+          {enc>0 && <div style={{background:C.bg,borderRadius:4,height:6,overflow:"hidden"}}>
+            <div style={{width:`${Math.min(dep/enc*100,100)}%`,height:"100%",background:C.accent,borderRadius:4,transition:"width 0.5s"}}/>
+          </div>}
+          {enc>0 && <div style={{fontSize:10,color:C.textMuted,marginTop:4}}>{dep>0?`${(dep/enc*100).toFixed(0)}% dépensé`:"Aucune dépense"}</div>}
+        </Card>;
+      })}
+      {caEvent>0 && <Card pad={16}>
+        <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>🎉 Événementiel</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:100,background:C.greenLight,borderRadius:8,padding:"8px 12px"}}>
+            <div style={{fontSize:10,color:C.green,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>Encaissé</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.green}}>{caEvent.toLocaleString("fr-FR")} €</div>
+          </div>
+          <div style={{flex:1,minWidth:100,background:C.primaryLight,borderRadius:8,padding:"8px 12px"}}>
+            <div style={{fontSize:10,color:C.primary,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>À récupérer</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.primary}}>{caEvent.toLocaleString("fr-FR")} €</div>
+          </div>
+        </div>
+      </Card>}
+    </div>
+
+    {/* Détail par point de vente */}
+    <SectionHead>Détail par point de vente</SectionHead>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {PDV_LIST.map(p=>{
+        const clotures = moisData.pdv[p.id]?.clotures||[];
+        const totalPdv = clotures.reduce((s,cl)=>
+          s+cl.modes.filter(m=>!/cb|carte bancaire/i.test(m.label)).reduce((a,m)=>a+n(m.montant),0),0);
+        if(totalPdv===0) return null;
+        return <Card key={p.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontWeight:600,fontSize:13}}>{p.emoji} {p.full}</div>
+            <div style={{fontWeight:700,fontSize:16,color:C.primary}}>{totalPdv.toLocaleString("fr-FR")} €</div>
+          </div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
+            {(()=>{
+              const modes={};
+              clotures.forEach(cl=>cl.modes.filter(m=>!/cb|carte bancaire/i.test(m.label)&&n(m.montant)>0).forEach(m=>{modes[m.label]=(modes[m.label]||0)+n(m.montant);}));
+              return Object.entries(modes).map(([label,montant])=>(
+                <span key={label} style={{background:C.primaryLight,color:C.primary,borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:500}}>
+                  {label} : {montant.toLocaleString("fr-FR")} €
+                </span>
+              ));
+            })()}
+          </div>
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
 // ─── MON COMPTE (changement de mot de passe) ─────────────────────────────────
 function MonCompte({patron, onLogout}){
   const [pwd,setPwd]=useState("");
@@ -1859,6 +1993,7 @@ function AppPatron({data,setData,patron,onLogout}){
     ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
+    {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
     {id:"journal",label:"Journal",icon:"📜"},
     {id:"compte",label:"Mon compte",icon:"🔑"},
   ];
@@ -1886,7 +2021,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","journal","compte"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","caisse","journal","compte"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -1900,7 +2035,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="journal"?"📜 Journal d'activité":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="caisse"?"🏦 Contrôle caisse":page==="journal"?"📜 Journal d'activité":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -1912,6 +2047,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
         {page==="import"&&<ImportCSV data={data} md={md} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
+        {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="journal"&&<JournalActivite/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
       </div>
