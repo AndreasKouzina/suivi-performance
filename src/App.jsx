@@ -1710,7 +1710,8 @@ function Dashboard({data,moisData,onUpdateMois}){
           <option value="">Mode de paiement…</option>
           <option value="Virement bancaire">Virement bancaire</option>
           <option value="Espèces">Espèces</option>
-          <option value="BL / Tickets resto">BL / Tickets resto</option>
+          <option value="BL">BL</option>
+          <option value="Tickets resto">Tickets resto</option>
           <option value="Chèque">Chèque</option>
           <option value="CB">CB</option>
         </select>
@@ -1768,7 +1769,7 @@ function ControleCaisse({moisData, paiements}){
   });
   // CA événementiel — uniquement les encaissements en espèces ou BL (pas virements/CB)
   const encaissementsEvent = moisData.pdv.evenementiel?.encaissements||[];
-  const isPhysique = (modeLabel) => /espèces|espece|bl|ticket/i.test(modeLabel);
+  const isPhysique = (modeLabel) => /espèces|espece|^bl$|tickets? resto/i.test(modeLabel);
   const caEventEspeces = encaissementsEvent
     .filter(e=>isPhysique(e.modeLabel))
     .reduce((s,e)=>s+n(e.montant),0);
