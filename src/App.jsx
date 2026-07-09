@@ -71,7 +71,7 @@ function fillPdvKeys(moisObj){
   PDV_LIST.forEach(p=>{
     if(!pdv[p.id]) pdv[p.id] = {ca:0,vars:{},clotures:[]};
   });
-  if(!pdv.evenementiel) pdv.evenementiel = {ca:0};
+  if(!pdv.evenementiel) pdv.evenementiel = {ca:0, encaissements:[]};
   if(!pdv._depenses) pdv._depenses = [];
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
 }
@@ -1649,6 +1649,7 @@ function PanneauPDV({pdvMois,onPdvChange,pdvCats,onPdvCatChange,tLabo,info,pct})
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({data,moisData,onUpdateMois}){
   const [montantEvent,setMontantEvent]=useState("");
+  const [modeEvent,setModeEvent]=useState("");
   const tL=totalLabo(data.laboCats,moisData.laboCh);
   const rep=repartition(moisData.pdv);
   const pdvs=PDV_LIST.map(p=>({...p,c:calcPDV(moisData.pdv[p.id],data.pdvCats[p.id],rep[p.id],tL)}));
@@ -1665,9 +1666,16 @@ function Dashboard({data,moisData,onUpdateMois}){
 
   const ajouterEvenementiel=()=>{
     if(!n(montantEvent)) return;
-    const ev = moisData.pdv.evenementiel||{ca:0};
-    onUpdateMois({...moisData, pdv:{...moisData.pdv, evenementiel:{ca:(n(ev.ca)+n(montantEvent))}}});
-    setMontantEvent("");
+    const ev = moisData.pdv.evenementiel||{ca:0,encaissements:[]};
+    const newEnc = {
+      id:uid(), montant:n(montantEvent),
+      modeLabel:modeEvent||"Non précisé",
+      date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR")
+    };
+    const encaissements = [...(ev.encaissements||[]), newEnc];
+    const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
+    onUpdateMois({...moisData, pdv:{...moisData.pdv, evenementiel:{ca:newCa, encaissements}}});
+    setMontantEvent(""); setModeEvent("");
   };
 
   return <div>
@@ -1682,15 +1690,33 @@ function Dashboard({data,moisData,onUpdateMois}){
       <KPICard label="Charges labo" value={`${tL.toLocaleString("fr-FR")} €`} color={C.accent}/>
     </div>
     <Card style={{background:C.fixeLight,marginBottom:20}} pad={16}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:caEvenementiel>0?12:0,flexWrap:"wrap",gap:8}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div style={{fontSize:13,fontWeight:700,color:C.fixe}}>🎉 CA Événementiel ce mois</div>
         <div style={{fontSize:18,fontWeight:800,color:C.fixe}}>{caEvenementiel.toLocaleString("fr-FR")} €</div>
       </div>
+      {/* Historique des encaissements événementiels */}
+      {(moisData.pdv.evenementiel?.encaissements||[]).length>0 && <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:4}}>
+        {(moisData.pdv.evenementiel.encaissements||[]).map(e=>(
+          <div key={e.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,background:"rgba(59,91,219,0.06)",borderRadius:6,padding:"5px 10px"}}>
+            <span style={{color:C.textMuted}}>{e.dateLabel} · {e.modeLabel}</span>
+            <strong style={{color:C.fixe}}>{n(e.montant).toLocaleString("fr-FR")} €</strong>
+          </div>
+        ))}
+      </div>}
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-        <div style={{flex:1,minWidth:140}}><MoneyInput value={montantEvent} onChange={setMontantEvent}/></div>
-        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)}
-          style={{...base,background:n(montantEvent)?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)?"pointer":"not-allowed"}}>
-          + Ajouter un encaissement événementiel
+        <div style={{flex:1,minWidth:120}}><MoneyInput value={montantEvent} onChange={setMontantEvent}/></div>
+        <select value={modeEvent} onChange={e=>setModeEvent(e.target.value)}
+          style={{...base,padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13,minWidth:140}}>
+          <option value="">Mode de paiement…</option>
+          <option value="Virement bancaire">Virement bancaire</option>
+          <option value="Espèces">Espèces</option>
+          <option value="BL / Tickets resto">BL / Tickets resto</option>
+          <option value="Chèque">Chèque</option>
+          <option value="CB">CB</option>
+        </select>
+        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)||!modeEvent}
+          style={{...base,background:n(montantEvent)&&modeEvent?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)&&modeEvent?"pointer":"not-allowed"}}>
+          + Ajouter
         </button>
       </div>
     </Card>
@@ -1740,8 +1766,12 @@ function ControleCaisse({moisData, paiements}){
       });
     });
   });
-  // CA événementiel — considéré comme encaissement espèces par défaut
-  const caEvent = n(moisData.pdv.evenementiel?.ca);
+  // CA événementiel — uniquement les encaissements en espèces ou BL (pas virements/CB)
+  const encaissementsEvent = moisData.pdv.evenementiel?.encaissements||[];
+  const isPhysique = (modeLabel) => /espèces|espece|bl|ticket/i.test(modeLabel);
+  const caEventEspeces = encaissementsEvent
+    .filter(e=>isPhysique(e.modeLabel))
+    .reduce((s,e)=>s+n(e.montant),0);
 
   // 2. Dépenses payées en modes hors CB (depuis _depenses)
   const depenses = {}; // { modeLabel: montant }
@@ -1757,7 +1787,7 @@ function ControleCaisse({moisData, paiements}){
     ...Object.keys(depenses),
   ])];
 
-  const totalEncaisse = Object.values(encaissements).reduce((a,b)=>a+b,0) + caEvent;
+  const totalEncaisse = Object.values(encaissements).reduce((a,b)=>a+b,0) + caEventEspeces;
   const totalDepenses = Object.values(depenses).reduce((a,b)=>a+b,0);
   const totalRestant = totalEncaisse - totalDepenses;
 
@@ -1813,18 +1843,23 @@ function ControleCaisse({moisData, paiements}){
           {enc>0 && <div style={{fontSize:10,color:C.textMuted,marginTop:4}}>{dep>0?`${(dep/enc*100).toFixed(0)}% dépensé`:"Aucune dépense"}</div>}
         </Card>;
       })}
-      {caEvent>0 && <Card pad={16}>
-        <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>🎉 Événementiel</div>
+      {caEventEspeces>0 && <Card pad={16}>
+        <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>🎉 Événementiel (espèces & BL)</div>
         <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
           <div style={{flex:1,minWidth:100,background:C.greenLight,borderRadius:8,padding:"8px 12px"}}>
             <div style={{fontSize:10,color:C.green,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>Encaissé</div>
-            <div style={{fontSize:18,fontWeight:700,color:C.green}}>{caEvent.toLocaleString("fr-FR")} €</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.green}}>{caEventEspeces.toLocaleString("fr-FR")} €</div>
           </div>
           <div style={{flex:1,minWidth:100,background:C.primaryLight,borderRadius:8,padding:"8px 12px"}}>
             <div style={{fontSize:10,color:C.primary,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6}}>À récupérer</div>
-            <div style={{fontSize:18,fontWeight:700,color:C.primary}}>{caEvent.toLocaleString("fr-FR")} €</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.primary}}>{caEventEspeces.toLocaleString("fr-FR")} €</div>
           </div>
         </div>
+        {encaissementsEvent.filter(e=>!isPhysique(e.modeLabel)).length>0 &&
+          <div style={{marginTop:8,fontSize:11,color:C.textMuted}}>
+            ℹ️ {encaissementsEvent.filter(e=>!isPhysique(e.modeLabel)).reduce((s,e)=>s+n(e.montant),0).toLocaleString("fr-FR")} € en virement/CB exclus du contrôle caisse
+          </div>
+        }
       </Card>}
     </div>
 
@@ -2040,12 +2075,12 @@ function AppPatron({data,setData,patron,onLogout}){
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
         {page==="dashboard"&&<Dashboard data={data} moisData={md} onUpdateMois={upd}/>}
-        {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd}/>}
-        {page==="clotures"&&<AllClotures moisData={md} onUpdateMois={upd}/>}
+        {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd} patron={patron}/>}
+        {page==="clotures"&&<AllClotures moisData={md} onUpdateMois={upd} patron={patron}/>}
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
-        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} onChange={v=>updData({...data,vendeurs:v})}/>}
-        {page==="import"&&<ImportCSV data={data} md={md} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
+        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData({...data,vendeurs:v})}/>}
+        {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="journal"&&<JournalActivite/>}
