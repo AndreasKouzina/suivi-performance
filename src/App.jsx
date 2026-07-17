@@ -285,13 +285,14 @@ async function markRowsImported(rows){
   }catch(err){ console.error("mark imported error",err); }
 }
 
-// ─── AUTHENTIFICATION PATRONS ─────────────────────────────────────────────────
+// ─── AUTHENTIFICATION PATRONS (via fonctions sécurisées Supabase) ────────────
 async function loginPatron(password){
   try{
-    const { data, error } = await supabase.from("patrons").select("*").eq("password_hash", password);
+    const { data, error } = await supabase.rpc("verify_patron_password", {
+      input_password: password
+    });
     if(error || !data || data.length===0) return null;
     const patron = data[0];
-    // Mise à jour du last_login
     await supabase.from("patrons").update({ last_login: new Date().toISOString() }).eq("id", patron.id);
     return patron;
   }catch(err){ console.error("login patron error",err); return null; }
@@ -299,7 +300,11 @@ async function loginPatron(password){
 
 async function updatePatronPassword(patronId, newPassword){
   try{
-    await supabase.from("patrons").update({ password_hash: newPassword }).eq("id", patronId);
+    const { data, error } = await supabase.rpc("update_patron_password", {
+      patron_id: patronId,
+      new_password: newPassword
+    });
+    if(error) return false;
     return true;
   }catch(err){ console.error("update password error",err); return false; }
 }
