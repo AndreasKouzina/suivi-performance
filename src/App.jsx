@@ -23,27 +23,80 @@ const TOTAL_J = PDV_LIST.reduce((s,p)=>s+p.j,0);
 const MOIS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
 const JOURS_SEMAINE = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
 
-const DEFAULT_LABO_CATS = [
-  { id:"matieres",  label:"Achats matières premières", type:"variable", montantFixe:0 },
-  { id:"loyer",     label:"Loyer",                     type:"fixe",     montantFixe:0 },
-  { id:"elec",      label:"Électricité",               type:"variable", montantFixe:0 },
-  { id:"eau",       label:"Eau",                       type:"variable", montantFixe:0 },
-  { id:"sal",       label:"Salaires bruts",            type:"fixe",     montantFixe:0 },
-  { id:"cs",        label:"Charges sociales",          type:"fixe",     montantFixe:0 },
-  { id:"fourni",    label:"Fournitures",               type:"variable", montantFixe:0 },
-  { id:"carburant", label:"Carburant",                 type:"variable", montantFixe:0 },
-  { id:"packaging", label:"Packaging",                 type:"variable", montantFixe:0 },
-  { id:"autre",     label:"Autres",                    type:"variable", montantFixe:0 },
+// ─── PLAN COMPTABLE DES CHARGES (catégories + sous-catégories) ───────────────
+const GROUPES_COMPTA = [
+  { id:"g601", label:"1. Achats matières premières (601/602)" },
+  { id:"g606", label:"2. Achats non stockés / fonctionnement (606)" },
+  { id:"g61",  label:"3. Services extérieurs (61)" },
+  { id:"g62",  label:"4. Autres services extérieurs (62)" },
+  { id:"g63",  label:"5. Impôts et taxes (63)" },
+  { id:"g64",  label:"6. Charges de personnel (64)" },
+  { id:"g66",  label:"7. Charges financières (66)" },
+  { id:"g67",  label:"8. Charges exceptionnelles (67)" },
+  { id:"g68",  label:"9. Dotations aux amortissements (68)" },
+  { id:"g0",   label:"À classer" },
 ];
-const DEFAULT_PDV_CATS = [
-  { id:"loyer",     label:"Loyer / Emplacement", type:"fixe",     montantFixe:0 },
-  { id:"elec",      label:"Électricité",          type:"variable", montantFixe:0 },
-  { id:"sal",       label:"Salaires",             type:"fixe",     montantFixe:0 },
-  { id:"cs",        label:"Charges sociales",     type:"fixe",     montantFixe:0 },
-  { id:"droits",    label:"Droits de marché",     type:"fixe",     montantFixe:0 },
-  { id:"transport", label:"Transport",            type:"variable", montantFixe:0 },
-  { id:"autre",     label:"Autres",               type:"variable", montantFixe:0 },
+const DEFAULT_COMPTA_CATS = [
+  // 1. Achats matières premières — 601/602
+  { id:"matieres",        groupe:"g601", label:"Denrées alimentaires",                          type:"variable", montantFixe:0 },
+  { id:"boissons",        groupe:"g601", label:"Boissons",                                      type:"variable", montantFixe:0 },
+  { id:"packaging",       groupe:"g601", label:"Emballages / contenants / vaisselle jetable",   type:"variable", montantFixe:0 },
+  { id:"fourni",          groupe:"g601", label:"Petit matériel consommable",                    type:"variable", montantFixe:0 },
+  { id:"fournitures_div", groupe:"g601", label:"Fournitures diverses (nappes, déco table)",     type:"variable", montantFixe:0 },
+  // 2. Achats non stockés / fonctionnement — 606
+  { id:"eau",             groupe:"g606", label:"Eau",                                           type:"variable", montantFixe:0 },
+  { id:"elec",            groupe:"g606", label:"Électricité",                                   type:"variable", montantFixe:0 },
+  { id:"gaz",             groupe:"g606", label:"Gaz",                                           type:"variable", montantFixe:0 },
+  { id:"fourn_entretien", groupe:"g606", label:"Fournitures d'entretien",                       type:"variable", montantFixe:0 },
+  { id:"fourn_admin",     groupe:"g606", label:"Fournitures administratives / bureau",          type:"variable", montantFixe:0 },
+  { id:"petit_equip",     groupe:"g606", label:"Petit équipement non immobilisé",               type:"variable", montantFixe:0 },
+  // 3. Services extérieurs — 61
+  { id:"loyer",           groupe:"g61",  label:"Loyers",                                        type:"fixe",     montantFixe:0 },
+  { id:"charges_loc",     groupe:"g61",  label:"Charges locatives / copropriété",               type:"fixe",     montantFixe:0 },
+  { id:"entretien_rep",   groupe:"g61",  label:"Entretien et réparation matériel",              type:"variable", montantFixe:0 },
+  { id:"maint_info",      groupe:"g61",  label:"Maintenance informatique",                      type:"variable", montantFixe:0 },
+  { id:"assurances",      groupe:"g61",  label:"Assurances (RC pro, locaux, marchandises, véhicules)", type:"fixe", montantFixe:0 },
+  { id:"loc_event",       groupe:"g61",  label:"Location matériel événementiel",                type:"variable", montantFixe:0 },
+  { id:"sous_trait",      groupe:"g61",  label:"Sous-traitance (renfort traiteur)",             type:"variable", montantFixe:0 },
+  { id:"formation",       groupe:"g61",  label:"Formation du personnel",                        type:"variable", montantFixe:0 },
+  // 4. Autres services extérieurs — 62
+  { id:"honoraires",      groupe:"g62",  label:"Honoraires (comptable, avocat)",                type:"variable", montantFixe:0 },
+  { id:"pub",             groupe:"g62",  label:"Publicité / marketing / site web",              type:"variable", montantFixe:0 },
+  { id:"deplacements",    groupe:"g62",  label:"Déplacements inter-sites (essence, péages, parking)", type:"variable", montantFixe:0 },
+  { id:"loc_vehicules",   groupe:"g62",  label:"Location véhicules utilitaires",                type:"variable", montantFixe:0 },
+  { id:"postaux",         groupe:"g62",  label:"Frais postaux",                                 type:"variable", montantFixe:0 },
+  { id:"telecom",         groupe:"g62",  label:"Télécommunications (téléphone, internet)",      type:"fixe",     montantFixe:0 },
+  { id:"commissions",     groupe:"g62",  label:"Commissions plateformes (livraison, réservation)", type:"variable", montantFixe:0 },
+  { id:"frais_cb",        groupe:"g62",  label:"Frais bancaires (tenue de compte, TPE)",        type:"variable", montantFixe:0 },
+  // 5. Impôts et taxes — 63
+  { id:"cfe",             groupe:"g63",  label:"CFE",                                           type:"variable", montantFixe:0 },
+  { id:"taxe_sal",        groupe:"g63",  label:"Taxe sur les salaires",                         type:"variable", montantFixe:0 },
+  { id:"formation_pro",   groupe:"g63",  label:"Formation professionnelle continue",            type:"variable", montantFixe:0 },
+  { id:"taxes_locales",   groupe:"g63",  label:"Autres taxes locales (enseigne, domaine public)", type:"variable", montantFixe:0 },
+  { id:"tvs",             groupe:"g63",  label:"Taxe sur véhicules de société",                 type:"variable", montantFixe:0 },
+  // 6. Charges de personnel — 64
+  { id:"sal",             groupe:"g64",  label:"Salaires bruts (permanents)",                   type:"fixe",     montantFixe:0 },
+  { id:"extras",          groupe:"g64",  label:"Salaires extras événementiels",                 type:"variable", montantFixe:0 },
+  { id:"cs",              groupe:"g64",  label:"Charges sociales patronales",                   type:"fixe",     montantFixe:0 },
+  { id:"avantages",       groupe:"g64",  label:"Tickets restaurant / avantages salariés",       type:"variable", montantFixe:0 },
+  // 7. Charges financières — 66
+  { id:"interets",        groupe:"g66",  label:"Intérêts d'emprunt",                            type:"fixe",     montantFixe:0 },
+  { id:"agios",           groupe:"g66",  label:"Agios bancaires",                               type:"variable", montantFixe:0 },
+  { id:"change",          groupe:"g66",  label:"Frais de change",                               type:"variable", montantFixe:0 },
+  // 8. Charges exceptionnelles — 67
+  { id:"penalites",       groupe:"g67",  label:"Pénalités / litiges",                           type:"variable", montantFixe:0 },
+  { id:"mat_perdu",       groupe:"g67",  label:"Matériel détruit / perdu",                      type:"variable", montantFixe:0 },
+  { id:"creances",        groupe:"g67",  label:"Créances irrécouvrables",                       type:"variable", montantFixe:0 },
+  // 9. Dotations aux amortissements — 68
+  { id:"amort_cuisine",   groupe:"g68",  label:"Amortissement matériel de cuisine",             type:"fixe",     montantFixe:0 },
+  { id:"amort_vehicule",  groupe:"g68",  label:"Amortissement véhicule frigorifique",           type:"fixe",     montantFixe:0 },
+  { id:"amort_equip",     groupe:"g68",  label:"Amortissement autres équipements",              type:"fixe",     montantFixe:0 },
+  { id:"amort_info",      groupe:"g68",  label:"Amortissement matériel informatique / caisses", type:"fixe",     montantFixe:0 },
+  // À classer
+  { id:"autre",           groupe:"g0",   label:"À classer",                                     type:"variable", montantFixe:0 },
 ];
+const DEFAULT_LABO_CATS = DEFAULT_COMPTA_CATS;
+const DEFAULT_PDV_CATS = DEFAULT_COMPTA_CATS;
 const DEFAULT_PAIEMENTS = [
   { id:"cb",      label:"Carte bancaire" },
   { id:"especes", label:"Espèces" },
@@ -106,30 +159,49 @@ function reconcilierDepenses(moisObj){
   // Ce flag est juste pour s'assurer que fillPdvKeys initialise bien les vars.
   return moisObj;
 }
-function migrateLaboCats(data){
-  let cats = (data.laboCats||[]).filter(c=>c.id!=="gaz");
-  let changed = cats.length !== (data.laboCats||[]).length;
-  if(!cats.find(c=>c.id==="carburant")){
-    cats = [...cats, {id:"carburant", label:"Carburant", type:"variable", montantFixe:0}];
-    changed = true;
-  }
-  if(!cats.find(c=>c.id==="packaging")){
-    cats = [...cats, {id:"packaging", label:"Packaging", type:"variable", montantFixe:0}];
-    changed = true;
-  }
-
-  // S'assure que chaque point de vente actuel a bien ses catégories de charges
-  // (utile après l'ajout de nouveaux points de vente, ex: Trosy, Escudier...)
-  let pdvCats = {...data.pdvCats};
-  PDV_LIST.forEach(p=>{
-    if(!pdvCats[p.id]){
-      pdvCats[p.id] = DEFAULT_PDV_CATS.map(c=>({...c}));
-      changed = true;
-    }
+// Migration vers le plan comptable (catégories/sous-catégories).
+// Les anciens ids sont conservés (renommés + rattachés à leur groupe) pour que
+// les montants déjà saisis (juillet...) restent visibles. Les sous-catégories
+// manquantes sont ajoutées.
+const MIGRATION_RENAME = {
+  matieres:  ["Denrées alimentaires","g601"],
+  packaging: ["Emballages / contenants / vaisselle jetable","g601"],
+  fourni:    ["Petit matériel consommable","g601"],
+  eau:       ["Eau","g606"],
+  elec:      ["Électricité","g606"],
+  gaz:       ["Gaz","g606"],
+  loyer:     ["Loyers","g61"],
+  sal:       ["Salaires bruts (permanents)","g64"],
+  cs:        ["Charges sociales patronales","g64"],
+  carburant: ["Déplacements inter-sites (essence, péages, parking)","g62"],
+  transport: ["Déplacements inter-sites (essence, péages, parking)","g62"],
+  frais_cb:  ["Frais bancaires (tenue de compte, TPE)","g62"],
+  droits:    ["Autres taxes locales (enseigne, domaine public)","g63"],
+  autre:     ["À classer","g0"],
+};
+function upgradeCatList(list){
+  let cats = (list||[]).map(c=>{
+    const r = MIGRATION_RENAME[c.id];
+    return r ? {...c, label:r[0], groupe:r[1]} : c;
   });
-
-  if(!changed) return data;
-  return {...data, laboCats:cats, pdvCats};
+  DEFAULT_COMPTA_CATS.forEach(dc=>{
+    if(!cats.find(c=>c.id===dc.id || c.label===dc.label)) cats.push({...dc});
+  });
+  return cats;
+}
+function migrateLaboCats(data){
+  if(data.catsVersion===2){
+    // Déjà migré : on s'assure juste que chaque PDV a ses catégories
+    let pdvCats = {...data.pdvCats}; let changed=false;
+    PDV_LIST.forEach(p=>{
+      if(!pdvCats[p.id]){ pdvCats[p.id]=DEFAULT_COMPTA_CATS.map(c=>({...c})); changed=true; }
+    });
+    return changed ? {...data, pdvCats} : data;
+  }
+  const laboCats = upgradeCatList(data.laboCats);
+  const pdvCats = {...data.pdvCats};
+  PDV_LIST.forEach(p=>{ pdvCats[p.id] = upgradeCatList(data.pdvCats?.[p.id]); });
+  return {...data, laboCats, pdvCats, catsVersion:2};
 }
 
 // Charge toutes les données depuis Supabase (app_data + tous les mois_data)
@@ -412,6 +484,22 @@ function SectionHead({children,action}){
     <div style={{fontSize:13,fontWeight:700,color:C.text}}>{children}</div>
     {action}
   </div>;
+}
+// Options de <select> groupées par grande catégorie comptable
+function CatOptions({cats}){
+  const perso = cats.filter(c=>!GROUPES_COMPTA.find(g=>g.id===c.groupe));
+  return <>
+    {GROUPES_COMPTA.map(g=>{
+      const items = cats.filter(c=>c.groupe===g.id);
+      if(items.length===0) return null;
+      return <optgroup key={g.id} label={g.label}>
+        {items.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+      </optgroup>;
+    })}
+    {perso.length>0 && <optgroup label="Personnalisées">
+      {perso.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+    </optgroup>}
+  </>;
 }
 function TypeToggle({value,onChange}){
   return <div style={{display:"flex",borderRadius:7,overflow:"hidden",border:`1px solid ${C.border}`,flexShrink:0}}>
@@ -1002,7 +1090,7 @@ function ImportCSV({data, md, onApplied}){
     pdvIdsUsed.forEach(pid=>{
       const cats=newPdvCats[pid]||[];
       if(!cats.find(c=>c.id==="frais_cb")){
-        newPdvCats[pid] = [...cats, {id:"frais_cb",label:"Frais bancaires CB",type:"variable",montantFixe:0}];
+        newPdvCats[pid] = [...cats, {id:"frais_cb",groupe:"g62",label:"Frais bancaires (tenue de compte, TPE)",type:"variable",montantFixe:0}];
       }
     });
 
@@ -1124,12 +1212,12 @@ function ImportCSV({data, md, onApplied}){
 
               {choix.type==="labo" && <select value={choix.catId} onChange={e=>{const cat=allCatsLabo.find(c2=>c2.id===e.target.value);setPend(c.row.id,{...choix,catId:cat.id,label:cat.label});}}
                 style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
-                {allCatsLabo.map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+                <CatOptions cats={allCatsLabo}/>
               </select>}
 
               {choix.type==="pdv" && <select value={choix.catId} onChange={e=>{const cats=data.pdvCats[choix.pdvId]||[];const cat=cats.find(c2=>c2.id===e.target.value);setPend(c.row.id,{...choix,catId:cat.id,label:cat.label});}}
                 style={{...base,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12}}>
-                {(data.pdvCats[choix.pdvId]||[]).map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+                <CatOptions cats={data.pdvCats[choix.pdvId]||[]}/>
               </select>}
 
               {choix.type!=="ignore" && choix.type!=="multi" && <select value={choix.lissage||"ponctuel"} onChange={e=>setPend(c.row.id,{...choix,lissage:e.target.value})}
@@ -1166,7 +1254,7 @@ function ImportCSV({data, md, onApplied}){
                         setPend(c.row.id,{...choix,repartition:newRep});
                       }}
                       style={{...base,padding:"6px 8px",borderRadius:6,border:`1px solid ${C.border}`,fontSize:11}}>
-                      {cats.map(cat=><option key={cat.id} value={cat.id}>{cat.label}</option>)}
+                      <CatOptions cats={cats}/>
                     </select>
                   </div>;
                 })}
@@ -1328,7 +1416,7 @@ function PanneauDepenses({data, md, onUpdateMois}){
           <Label>Catégorie</Label>
           <select value={form.catId} onChange={e=>setForm({...form,catId:e.target.value})}
             style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
-            {catsDisponibles.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+            <CatOptions cats={catsDisponibles}/>
           </select>
         </div>
         <button onClick={ajouter} disabled={!n(form.montant)}
@@ -1520,6 +1608,10 @@ function AllClotures({moisData, onUpdateMois}){
 // ─── CHARGES LIST (réutilisable) ──────────────────────────────────────────────
 function ChargesList({cats,onCatChange,varsMois,onVarsChange,title,addLabel="+ Ajouter"}){
   const [del,setDel]=useState(null);
+  const [showAll,setShowAll]=useState(false);
+  // Par défaut on n'affiche que les sous-catégories renseignées (+ personnalisées)
+  const hasValue=c=> n(c.montantFixe)>0 || n(varsMois?.[c.id])>0;
+  const visibleCats = showAll ? cats : cats.filter(c=>hasValue(c)||!GROUPES_COMPTA.find(g=>g.id===c.groupe));
   const updCat=(id,f,v)=>onCatChange(cats.map(c=>c.id===id?{...c,[f]:v}:c));
   const updVar=(id,v)=>onVarsChange({...varsMois,[id]:v});
   const add=()=>onCatChange([...cats,{id:uid(),label:"Nouvelle charge",type:"variable",montantFixe:0}]);
@@ -1538,8 +1630,18 @@ function ChargesList({cats,onCatChange,varsMois,onVarsChange,title,addLabel="+ A
       </div>
     </div>
     <SectionHead action={<button onClick={add} style={{...base,background:C.primary,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>{addLabel}</button>}>{title} ({cats.length})</SectionHead>
-    <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:8}}>
-      {cats.map(cat=>{
+    <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.textMuted,marginBottom:12,cursor:"pointer"}}>
+      <input type="checkbox" checked={showAll} onChange={e=>setShowAll(e.target.checked)}/>
+      Afficher toutes les sous-catégories (y compris celles à 0 €)
+    </label>
+    <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:8}}>
+      {[...GROUPES_COMPTA.map(g=>({hdr:g.label,items:visibleCats.filter(c=>c.groupe===g.id)})),
+        {hdr:"Personnalisées",items:visibleCats.filter(c=>!GROUPES_COMPTA.find(g=>g.id===c.groupe))}]
+        .filter(sec=>sec.items.length>0)
+        .map(sec=><div key={sec.hdr}>
+          <div style={{fontSize:11,fontWeight:700,color:C.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8,paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{sec.hdr}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {sec.items.map(cat=>{
         const isF=cat.type==="fixe";
         return <div key={cat.id} style={{background:isF?C.fixeLight:C.variableLight,border:`1.5px solid ${isF?C.fixe+"33":C.variable+"33"}`,borderRadius:12,padding:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
@@ -1565,6 +1667,8 @@ function ChargesList({cats,onCatChange,varsMois,onVarsChange,title,addLabel="+ A
           {isF&&<div style={{marginTop:8,fontSize:11,color:C.fixe,background:"rgba(59,91,219,0.08)",borderRadius:6,padding:"3px 8px",display:"inline-block"}}>✓ Reporté automatiquement chaque mois</div>}
         </div>;
       })}
+          </div>
+        </div>)}
     </div>
   </div>;
 }
@@ -1661,8 +1765,9 @@ function Dashboard({data,moisData,onUpdateMois}){
   const caEvenementiel = n(moisData.pdv.evenementiel?.ca);
   const tCA=pdvs.reduce((a,p)=>a+p.c.ca,0) + caEvenementiel;
   const tNet=pdvs.reduce((a,p)=>a+p.c.res,0) + caEvenementiel;
-  const catMat=data.laboCats.find(c=>c.id==="matieres");
-  const totalMat=catMat?montantCat(catMat,moisData.laboCh):0;
+  // Marge brute = CA − groupe "Achats matières premières" (601/602) du labo
+  const totalMat=data.laboCats.filter(c=>c.groupe==="g601"||c.id==="matieres")
+    .reduce((s,c)=>s+montantCat(c,moisData.laboCh),0);
   const tMB=tCA-totalMat;
   const pctMB=tCA>0?tMB/tCA*100:0;
   const sorted=[...pdvs].sort((a,b)=>b.c.res-a.c.res);
