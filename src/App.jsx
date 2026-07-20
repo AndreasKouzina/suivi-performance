@@ -1336,8 +1336,11 @@ function ImportCSV({data, md, onApplied}){
 // ─── PANNEAU DÉPENSES (saisie manuelle par le patron) ────────────────────────
 function PanneauDepenses({data, md, onUpdateMois}){
   const [form,setForm]=useState({montant:"",modeId:data.paiements[0]?.id||"",scope:"labo",pdvId:PDV_LIST[0]?.id,catId:data.laboCats[0]?.id});
+  const [reclassant,setReclassant]=useState(null); // dépense en cours de reclassement
+  const [reclassForm,setReclassForm]=useState({scope:"labo",pdvId:PDV_LIST[0]?.id,catId:""});
 
   const catsDisponibles = form.scope==="labo" ? data.laboCats : (data.pdvCats[form.pdvId]||[]);
+  const reclassCats = reclassant ? (reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[])) : [];
 
   const ajouter = ()=>{
     if(!n(form.montant)) return;
@@ -1345,7 +1348,6 @@ function PanneauDepenses({data, md, onUpdateMois}){
     const mode = data.paiements.find(p=>p.id===form.modeId);
     const pdvInfo = PDV_LIST.find(p=>p.id===form.pdvId);
     const montant = n(form.montant);
-
     let laboCh = {...md.laboCh};
     let pdvObj = {...md.pdv};
     if(form.scope==="labo"){
@@ -1361,7 +1363,6 @@ function PanneauDepenses({data, md, onUpdateMois}){
       montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
     };
     pdvObj = {...pdvObj, _depenses:[...(md.pdv._depenses||[]), log]};
-
     onUpdateMois({...md, laboCh, pdv:pdvObj});
     setForm({...form, montant:""});
   };
@@ -1379,14 +1380,86 @@ function PanneauDepenses({data, md, onUpdateMois}){
     onUpdateMois({...md, laboCh, pdv:pdvObj});
   };
 
+  const sauvegarderReclassement = ()=>{
+    if(!reclassant) return;
+    const cats = reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[]);
+    const cat = cats.find(c=>c.id===reclassForm.catId) || cats[0];
+    const pdvInfo = PDV_LIST.find(p=>p.id===reclassForm.pdvId);
+    // 1. Retirer l'ancien montant
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(reclassant.scope==="labo"){
+      laboCh[reclassant.catId] = Math.max(0, n(laboCh[reclassant.catId]) - reclassant.montant);
+    } else if(reclassant.pdvId){
+      const pm = pdvObj[reclassant.pdvId];
+      if(pm) pdvObj = {...pdvObj, [reclassant.pdvId]: {...pm, vars:{...pm.vars, [reclassant.catId]:Math.max(0,n(pm.vars?.[reclassant.catId])-reclassant.montant)}}};
+    }
+    // 2. Ajouter dans la nouvelle catégorie
+    if(reclassForm.scope==="labo"){
+      laboCh[cat.id] = n(laboCh[cat.id]) + reclassant.montant;
+    } else {
+      const pm = pdvObj[reclassForm.pdvId];
+      pdvObj = {...pdvObj, [reclassForm.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+reclassant.montant)}}};
+    }
+    // 3. Mettre à jour le log
+    const newLog = {...reclassant, scope:reclassForm.scope, catId:cat.id, catLabel:cat.label,
+      pdvId:reclassForm.scope==="pdv"?reclassForm.pdvId:null,
+      pdvLabel:reclassForm.scope==="pdv"?pdvInfo?.full:null};
+    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).map(d=>d.id===reclassant.id?newLog:d)};
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
+    setReclassant(null);
+  };
+
   const toutesDepenses = [...(md.pdv._depenses||[])].reverse();
   const totalMois = toutesDepenses.reduce((s,d)=>s+n(d.montant),0);
+  const aClasser = toutesDepenses.filter(d=>d.catId==="autre"||d.catLabel==="À classer"||d.catLabel==="Autres");
 
   return <div>
+    {/* Modal de reclassement */}
+    {reclassant && <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <Card style={{width:"100%",maxWidth:420}} pad={20}>
+        <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>🔄 Reclasser cette dépense</div>
+        <div style={{fontSize:12,color:C.textMuted,marginBottom:16}}>
+          {reclassant.dateLabel} · {reclassant.modeLabel} · <strong>{n(reclassant.montant).toLocaleString("fr-FR")} €</strong>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div>
+            <Label>Affecter à</Label>
+            <select value={reclassForm.scope==="labo"?"labo":`pdv:${reclassForm.pdvId}`}
+              onChange={e=>{
+                const v=e.target.value;
+                if(v==="labo") setReclassForm({...reclassForm,scope:"labo",catId:data.laboCats[0]?.id});
+                else { const pdvId=v.split(":")[1]; setReclassForm({...reclassForm,scope:"pdv",pdvId,catId:(data.pdvCats[pdvId]||[])[0]?.id}); }
+              }}
+              style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+              <option value="labo">🏭 Laboratoire</option>
+              {PDV_LIST.map(p=><option key={p.id} value={`pdv:${p.id}`}>{p.emoji} {p.full}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label>Catégorie</Label>
+            <select value={reclassForm.catId} onChange={e=>setReclassForm({...reclassForm,catId:e.target.value})}
+              style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+              <CatOptions cats={reclassCats}/>
+            </select>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:16}}>
+          <button onClick={()=>setReclassant(null)} style={{...base,flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px",fontWeight:600,cursor:"pointer",color:C.textMuted}}>Annuler</button>
+          <button onClick={sauvegarderReclassement} style={{...base,flex:2,background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"11px",fontWeight:700,cursor:"pointer"}}>Reclasser</button>
+        </div>
+      </Card>
+    </div>}
+
+    {/* Alerte À classer */}
+    {aClasser.length>0 && <Card style={{background:C.warnLight,border:`1px solid ${C.warn}`,marginBottom:16}} pad={14}>
+      <div style={{fontWeight:700,fontSize:13,color:C.accent,marginBottom:6}}>⚠️ {aClasser.length} dépense(s) à reclasser</div>
+      <div style={{fontSize:12,color:C.textMuted}}>Ces dépenses sont classées dans "À classer" — cliquez sur "Reclasser" pour les affecter à la bonne catégorie.</div>
+    </Card>}
+
     <Card style={{marginBottom:20}}>
       <SectionHead>➕ Ajouter une dépense manuelle</SectionHead>
       <div style={{fontSize:12,color:C.textMuted,marginBottom:14}}>Pour les dépenses en espèces ou non visibles dans le relevé bancaire.</div>
-
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
         <div>
           <Label>Montant</Label>
@@ -1427,22 +1500,30 @@ function PanneauDepenses({data, md, onUpdateMois}){
     </Card>
 
     <SectionHead>Dépenses du mois ({toutesDepenses.length}) {totalMois>0&&`· ${totalMois.toLocaleString("fr-FR")} €`}</SectionHead>
-    {toutesDepenses.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune dépense manuelle ce mois-ci</div></Card>}
+    {toutesDepenses.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune dépense ce mois-ci</div></Card>}
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      {toutesDepenses.map(dep=>(
-        <Card key={dep.id} pad={14}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div>
-              <div style={{fontWeight:600,fontSize:13}}>{dep.catLabel} {dep.scope==="labo"?"· 🏭 Labo":`· ${dep.pdvLabel}`}</div>
+      {toutesDepenses.map(dep=>{
+        const isAClasser = dep.catId==="autre"||dep.catLabel==="À classer"||dep.catLabel==="Autres";
+        return <Card key={dep.id} pad={14} style={isAClasser?{border:`1.5px solid ${C.warn}`,background:C.warnLight}:{}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:6}}>
+                {isAClasser && <span style={{fontSize:11,background:C.accent,color:"#fff",borderRadius:4,padding:"1px 6px"}}>À classer</span>}
+                {dep.catLabel} {dep.scope==="labo"?"· 🏭 Labo":`· ${dep.pdvLabel||""}`}
+              </div>
               <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{dep.dateLabel} · {dep.vendeurNom} · {dep.modeLabel}</div>
             </div>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <strong style={{fontSize:15,color:C.accent}}>{n(dep.montant).toLocaleString("fr-FR")} €</strong>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+              <strong style={{fontSize:15,color:isAClasser?C.accent:C.primary}}>{n(dep.montant).toLocaleString("fr-FR")} €</strong>
+              <button onClick={()=>{ setReclassant(dep); setReclassForm({scope:dep.scope||"labo",pdvId:dep.pdvId||PDV_LIST[0]?.id,catId:dep.catId||""}); }}
+                style={{...base,background:C.primaryLight,color:C.primary,border:"none",borderRadius:7,padding:"6px 10px",cursor:"pointer",fontSize:12,fontWeight:600}}>
+                🔄 Reclasser
+              </button>
               <button onClick={()=>supprimer(dep)} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:7,padding:"6px 10px",cursor:"pointer",fontSize:12,fontWeight:600}}>Suppr.</button>
             </div>
           </div>
-        </Card>
-      ))}
+        </Card>;
+      })}
     </div>
   </div>;
 }
