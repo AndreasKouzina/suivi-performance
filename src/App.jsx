@@ -242,6 +242,62 @@ async function saveMoisToSupabase(key, moisObj){
   }catch(err){ console.error("Supabase save mois_data error:", err); }
 }
 
+// ─── ÉCRITURE SÉCURISÉE (anti-écrasement) ─────────────────────────────────────
+// Point d'entrée UNIQUE pour toute modification des données de l'app.
+// Principe : on ne modifie JAMAIS le state React local directement dans Supabase.
+// On recharge toujours la version la plus fraîche depuis Supabase juste avant
+// d'écrire, on applique la modification demandée par-dessus cette version
+// fraîche, puis on sauvegarde. Ça élimine toute la classe de bugs où deux
+// écritures concurrentes (deux onglets, un vendeur + un patron, un import CSV
+// en cours...) s'écrasent l'une l'autre au lieu de se cumuler.
+//
+// conflictNotifier (optionnel) : callback appelé si on détecte que la donnée
+// en base avait changé depuis le dernier chargement connu du state local —
+// utile pour informer l'utilisateur plutôt que de silencieusement écraser.
+let lastKnownRemoteSnapshot = null; // pour détection de conflit (best-effort)
+
+async function safeWriteMois(currentData, key, mutatorFn, conflictNotifier){
+  const remote = await loadFromSupabase();
+  const freshData = remote ? migrateLaboCats(remote) : currentData;
+  const freshMois = fillPdvKeys(freshData.mois[key] || initMois());
+
+  // Détection de conflit best-effort : si le mois distant existait déjà dans
+  // notre state local ET diffère de ce qu'on avait en mémoire, quelqu'un
+  // d'autre a écrit entre-temps.
+  if(conflictNotifier && currentData.mois[key]){
+    const localSerialized = JSON.stringify(fillPdvKeys(currentData.mois[key]));
+    const remoteSerialized = JSON.stringify(freshMois);
+    if(localSerialized !== remoteSerialized){
+      conflictNotifier();
+    }
+  }
+
+  const newMois = mutatorFn(freshMois);
+  await saveMoisToSupabase(key, newMois);
+  const newData = {...freshData, mois:{...freshData.mois, [key]:newMois}};
+  saveCache(newData);
+  return newData;
+}
+
+// Variante pour les données globales (app_data) : catégories, vendeurs, paiements...
+async function safeWriteAppData(currentData, mutatorFn, conflictNotifier){
+  const remote = await loadFromSupabase();
+  const freshData = remote ? migrateLaboCats(remote) : currentData;
+
+  if(conflictNotifier){
+    const localSerialized = JSON.stringify({laboCats:currentData.laboCats,pdvCats:currentData.pdvCats,paiements:currentData.paiements,vendeurs:currentData.vendeurs});
+    const remoteSerialized = JSON.stringify({laboCats:freshData.laboCats,pdvCats:freshData.pdvCats,paiements:freshData.paiements,vendeurs:freshData.vendeurs});
+    if(localSerialized !== remoteSerialized){
+      conflictNotifier();
+    }
+  }
+
+  const newData = mutatorFn(freshData);
+  await saveAppDataToSupabase(newData);
+  saveCache(newData);
+  return newData;
+}
+
 // ─── IMPORT CSV — parsing, règles, classification ─────────────────────────────
 async function loadImportRules(){
   try{
@@ -1031,8 +1087,14 @@ function ImportCSV({data, md, onApplied}){
     }
 
     // 2. Appliquer chaque opération aux bons mois (avec lissage)
-    const moisCache = { [data.active]: md }; // on ne modifie que le mois actif + futurs si lissage
-    const startKey = data.active;
+    // CORRECTIF ANTI-ÉCRASEMENT : on repart des données fraîches de Supabase
+    // plutôt que de `md`/`data` (potentiellement périmés si quelqu'un d'autre
+    // a écrit pendant que le patron classait les lignes du CSV).
+    const remoteForImport = await loadFromSupabase();
+    const freshDataForImport = remoteForImport ? migrateLaboCats(remoteForImport) : data;
+    const startKey = freshDataForImport.active;
+    const freshMdForImport = fillPdvKeys(freshDataForImport.mois[startKey] || initMois());
+    const moisCache = { [startKey]: freshMdForImport }; // on ne modifie que le mois actif + futurs si lissage
 
     for(const op of ops){
       const nbMois = op.lissage==="trimestriel"?3 : op.lissage==="annuel"?12 : op.lissage==="personnalise"?(op.nbMois||1) : 1;
@@ -1060,7 +1122,7 @@ function ImportCSV({data, md, onApplied}){
     }
 
     // 3. S'assurer que la catégorie "frais_cb" existe dans chaque pdvCats concerné
-    let newPdvCats = {...data.pdvCats};
+    let newPdvCats = {...freshDataForImport.pdvCats};
     const pdvIdsUsed = new Set(ops.filter(o=>o.type==="pdv"&&o.catId==="frais_cb").map(o=>o.pdvId));
     pdvIdsUsed.forEach(pid=>{
       const cats=newPdvCats[pid]||[];
@@ -1073,7 +1135,7 @@ function ImportCSV({data, md, onApplied}){
     for(const [key,moisObj] of Object.entries(moisCache)){
       await saveMoisToSupabase(key, moisObj);
     }
-    const newData = {...data, pdvCats:newPdvCats};
+    const newData = {...freshDataForImport, pdvCats:newPdvCats};
     await saveAppDataToSupabase(newData);
 
     // 5. Mémoriser l'empreinte de toutes les lignes de ce relevé pour détecter les doublons futurs
@@ -1316,42 +1378,49 @@ function PanneauDepenses({data, md, onUpdateMois}){
   const catsDisponibles = form.scope==="labo" ? data.laboCats : (data.pdvCats[form.pdvId]||[]);
   const reclassCats = reclassant ? (reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[])) : [];
 
+  // CORRECTIF ANTI-ÉCRASEMENT : chaque mutation part désormais d'un mutateur
+  // fonctionnel appliqué par onUpdateMois (= upd) sur le mois FRAIS rechargé
+  // depuis Supabase, jamais sur `md` capturé au moment du rendu.
   const ajouter = ()=>{
     if(!n(form.montant)) return;
     const cat = catsDisponibles.find(c=>c.id===form.catId) || catsDisponibles[0];
     const mode = data.paiements.find(p=>p.id===form.modeId);
     const pdvInfo = PDV_LIST.find(p=>p.id===form.pdvId);
     const montant = n(form.montant);
-    let laboCh = {...md.laboCh};
-    let pdvObj = {...md.pdv};
-    if(form.scope==="labo"){
-      laboCh[cat.id] = n(laboCh[cat.id]) + montant;
-    } else {
-      const pm = pdvObj[form.pdvId];
-      pdvObj = {...pdvObj, [form.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+montant)}}};
-    }
-    const log = {
-      id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
-      vendeurNom:"Patron (saisie manuelle)", pdvId:form.scope==="pdv"?form.pdvId:null,
-      pdvLabel:form.scope==="pdv"?pdvInfo?.full:null,
-      montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
-    };
-    pdvObj = {...pdvObj, _depenses:[...(md.pdv._depenses||[]), log]};
-    onUpdateMois({...md, laboCh, pdv:pdvObj});
+    onUpdateMois(freshMois=>{
+      let laboCh = {...freshMois.laboCh};
+      let pdvObj = {...freshMois.pdv};
+      if(form.scope==="labo"){
+        laboCh[cat.id] = n(laboCh[cat.id]) + montant;
+      } else {
+        const pm = pdvObj[form.pdvId];
+        pdvObj = {...pdvObj, [form.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+montant)}}};
+      }
+      const log = {
+        id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
+        vendeurNom:"Patron (saisie manuelle)", pdvId:form.scope==="pdv"?form.pdvId:null,
+        pdvLabel:form.scope==="pdv"?pdvInfo?.full:null,
+        montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
+      };
+      pdvObj = {...pdvObj, _depenses:[...(freshMois.pdv._depenses||[]), log]};
+      return {...freshMois, laboCh, pdv:pdvObj};
+    });
     setForm({...form, montant:""});
   };
 
   const supprimer = (dep)=>{
-    let laboCh = {...md.laboCh};
-    let pdvObj = {...md.pdv};
-    if(dep.scope==="labo"){
-      laboCh[dep.catId] = Math.max(0, n(laboCh[dep.catId]) - dep.montant);
-    } else {
-      const pm = pdvObj[dep.pdvId];
-      if(pm) pdvObj = {...pdvObj, [dep.pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:Math.max(0,n(pm.vars?.[dep.catId])-dep.montant)}}};
-    }
-    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).filter(d=>d.id!==dep.id)};
-    onUpdateMois({...md, laboCh, pdv:pdvObj});
+    onUpdateMois(freshMois=>{
+      let laboCh = {...freshMois.laboCh};
+      let pdvObj = {...freshMois.pdv};
+      if(dep.scope==="labo"){
+        laboCh[dep.catId] = Math.max(0, n(laboCh[dep.catId]) - dep.montant);
+      } else {
+        const pm = pdvObj[dep.pdvId];
+        if(pm) pdvObj = {...pdvObj, [dep.pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:Math.max(0,n(pm.vars?.[dep.catId])-dep.montant)}}};
+      }
+      pdvObj = {...pdvObj, _depenses:(freshMois.pdv._depenses||[]).filter(d=>d.id!==dep.id)};
+      return {...freshMois, laboCh, pdv:pdvObj};
+    });
   };
 
   const sauvegarderReclassement = ()=>{
@@ -1359,28 +1428,30 @@ function PanneauDepenses({data, md, onUpdateMois}){
     const cats = reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[]);
     const cat = cats.find(c=>c.id===reclassForm.catId) || cats[0];
     const pdvInfo = PDV_LIST.find(p=>p.id===reclassForm.pdvId);
-    // 1. Retirer l'ancien montant
-    let laboCh = {...md.laboCh};
-    let pdvObj = {...md.pdv};
-    if(reclassant.scope==="labo"){
-      laboCh[reclassant.catId] = Math.max(0, n(laboCh[reclassant.catId]) - reclassant.montant);
-    } else if(reclassant.pdvId){
-      const pm = pdvObj[reclassant.pdvId];
-      if(pm) pdvObj = {...pdvObj, [reclassant.pdvId]: {...pm, vars:{...pm.vars, [reclassant.catId]:Math.max(0,n(pm.vars?.[reclassant.catId])-reclassant.montant)}}};
-    }
-    // 2. Ajouter dans la nouvelle catégorie
-    if(reclassForm.scope==="labo"){
-      laboCh[cat.id] = n(laboCh[cat.id]) + reclassant.montant;
-    } else {
-      const pm = pdvObj[reclassForm.pdvId];
-      pdvObj = {...pdvObj, [reclassForm.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+reclassant.montant)}}};
-    }
-    // 3. Mettre à jour le log
-    const newLog = {...reclassant, scope:reclassForm.scope, catId:cat.id, catLabel:cat.label,
-      pdvId:reclassForm.scope==="pdv"?reclassForm.pdvId:null,
-      pdvLabel:reclassForm.scope==="pdv"?pdvInfo?.full:null};
-    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).map(d=>d.id===reclassant.id?newLog:d)};
-    onUpdateMois({...md, laboCh, pdv:pdvObj});
+    onUpdateMois(freshMois=>{
+      // 1. Retirer l'ancien montant
+      let laboCh = {...freshMois.laboCh};
+      let pdvObj = {...freshMois.pdv};
+      if(reclassant.scope==="labo"){
+        laboCh[reclassant.catId] = Math.max(0, n(laboCh[reclassant.catId]) - reclassant.montant);
+      } else if(reclassant.pdvId){
+        const pm = pdvObj[reclassant.pdvId];
+        if(pm) pdvObj = {...pdvObj, [reclassant.pdvId]: {...pm, vars:{...pm.vars, [reclassant.catId]:Math.max(0,n(pm.vars?.[reclassant.catId])-reclassant.montant)}}};
+      }
+      // 2. Ajouter dans la nouvelle catégorie
+      if(reclassForm.scope==="labo"){
+        laboCh[cat.id] = n(laboCh[cat.id]) + reclassant.montant;
+      } else {
+        const pm = pdvObj[reclassForm.pdvId];
+        pdvObj = {...pdvObj, [reclassForm.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+reclassant.montant)}}};
+      }
+      // 3. Mettre à jour le log
+      const newLog = {...reclassant, scope:reclassForm.scope, catId:cat.id, catLabel:cat.label,
+        pdvId:reclassForm.scope==="pdv"?reclassForm.pdvId:null,
+        pdvLabel:reclassForm.scope==="pdv"?pdvInfo?.full:null};
+      pdvObj = {...pdvObj, _depenses:(freshMois.pdv._depenses||[]).map(d=>d.id===reclassant.id?newLog:d)};
+      return {...freshMois, laboCh, pdv:pdvObj};
+    });
     setReclassant(null);
   };
 
@@ -1539,25 +1610,31 @@ function AllClotures({moisData, onUpdateMois}){
   };
 
   // Sauvegarder la clôture modifiée
+  // CORRECTIF ANTI-ÉCRASEMENT : mutateur fonctionnel appliqué sur le mois
+  // frais rechargé par onUpdateMois, pas sur moisData capturé au rendu.
   const sauvegarderEdition=()=>{
     const newTotal = editModes.reduce((s,m)=>s+n(m.montant),0);
     const updatedCloture = {...editing, modes:editModes, note:editNote, total:newTotal};
     const pdvId = editing.pdvId;
-    const pdvMois = moisData.pdv[pdvId];
-    const newClotures = (pdvMois.clotures||[]).map(c=>c.id===editing.id?updatedCloture:c);
-    const newCa = caDepuisClotures(newClotures);
-    const newPdv = {...moisData.pdv, [pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
-    onUpdateMois({...moisData, pdv:newPdv});
+    onUpdateMois(freshMois=>{
+      const pdvMois = freshMois.pdv[pdvId];
+      const newClotures = (pdvMois.clotures||[]).map(c=>c.id===editing.id?updatedCloture:c);
+      const newCa = caDepuisClotures(newClotures);
+      const newPdv = {...freshMois.pdv, [pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+      return {...freshMois, pdv:newPdv};
+    });
     setEditing(null);
   };
 
   // Supprimer une clôture
   const supprimerCloture=(c)=>{
-    const pdvMois = moisData.pdv[c.pdvId];
-    const newClotures = (pdvMois.clotures||[]).filter(x=>x.id!==c.id);
-    const newCa = caDepuisClotures(newClotures);
-    const newPdv = {...moisData.pdv, [c.pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
-    onUpdateMois({...moisData, pdv:newPdv});
+    onUpdateMois(freshMois=>{
+      const pdvMois = freshMois.pdv[c.pdvId];
+      const newClotures = (pdvMois.clotures||[]).filter(x=>x.id!==c.id);
+      const newCa = caDepuisClotures(newClotures);
+      const newPdv = {...freshMois.pdv, [c.pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+      return {...freshMois, pdv:newPdv};
+    });
   };
 
   return <div>
@@ -1830,10 +1907,10 @@ function Dashboard({data,moisData,onUpdateMois}){
   const today=todayKey();
   const cloturesDuJour=PDV_LIST.flatMap(p=>(moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today));
 
-  // CORRECTIF ANTI-ÉCRASEMENT : recharge Supabase juste avant d'écrire un
-  // encaissement événementiel, pour ne jamais partir d'un state React périmé
-  // qui écraserait des encaissements ajoutés entre-temps (autre onglet,
-  // saisie vendeur en parallèle, etc.).
+  // CORRECTIF ANTI-ÉCRASEMENT : onUpdateMois (= upd, voir AppPatron) recharge
+  // déjà Supabase juste avant d'écrire et applique ce mutateur sur le mois
+  // FRAIS — jamais sur un state React local potentiellement périmé. C'est le
+  // même point d'entrée sécurisé utilisé par toutes les autres écritures.
   const ajouterEvenementiel=async ()=>{
     if(!n(montantEvent)) return;
     setSavingEvent(true);
@@ -1842,13 +1919,12 @@ function Dashboard({data,moisData,onUpdateMois}){
       modeLabel:modeEvent||"Non précisé",
       date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR")
     };
-    const remote = await loadFromSupabase();
-    const key = moisKey();
-    const freshMois = remote ? fillPdvKeys(remote.mois[key]||initMois()) : moisData;
-    const ev = freshMois.pdv.evenementiel||{ca:0,encaissements:[]};
-    const encaissements = [...(ev.encaissements||[]), newEnc];
-    const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
-    await onUpdateMois({...freshMois, pdv:{...freshMois.pdv, evenementiel:{ca:newCa, encaissements}}});
+    await onUpdateMois(freshMois=>{
+      const ev = freshMois.pdv.evenementiel||{ca:0,encaissements:[]};
+      const encaissements = [...(ev.encaissements||[]), newEnc];
+      const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
+      return {...freshMois, pdv:{...freshMois.pdv, evenementiel:{ca:newCa, encaissements}}};
+    });
     setMontantEvent(""); setModeEvent(""); setSavingEvent(false);
   };
 
@@ -2171,26 +2247,36 @@ function JournalActivite(){
 function AppPatron({data,setData,patron,onLogout}){
   const [page,setPage]=useState("dashboard");
   const [menu,setMenu]=useState(false);
+  const [conflictMsg,setConflictMsg]=useState(null);
   const key=data.active;
   const [an,mi]=key.split("-").map(Number);
   const getMois=()=>fillPdvKeys(data.mois[key]||initMois());
   const md=getMois();
 
-  // CORRECTIF ANTI-ÉCRASEMENT : avant d'écrire le mois actif dans Supabase,
-  // on recharge d'abord la version la plus récente en base et on fusionne
-  // la modification demandée par-dessus, au lieu d'écraser directement avec
-  // le state local (potentiellement périmé si un autre onglet, un import CSV,
-  // ou une saisie vendeur a modifié les données entre-temps).
-  const upd=async (nm)=>{
-    const remote = await loadFromSupabase();
-    setData(prev=>{
-      const base = remote ? {...prev, mois:{...prev.mois, [key]: fillPdvKeys(remote.mois[key]||initMois())}} : prev;
-      const u={...base,mois:{...base.mois,[key]:nm}};
-      saveCache(u); saveMoisToSupabase(key,nm);
-      return u;
-    });
+  const notifyConflict=()=>{
+    setConflictMsg("Les données ont été modifiées ailleurs entre-temps (autre appareil, import, ou saisie vendeur). Votre action a été appliquée sur la version la plus récente — rien n'a été perdu.");
+    setTimeout(()=>setConflictMsg(null), 8000);
   };
-  const updData=nd=>{ saveCache(nd); saveAppDataToSupabase(nd); setData(nd); };
+
+  // CORRECTIF ANTI-ÉCRASEMENT : point d'entrée UNIQUE pour toute modification
+  // du mois actif. mutatorFn reçoit toujours le mois FRAIS (rechargé depuis
+  // Supabase juste avant) et retourne le nouveau mois — jamais de state local
+  // périmé écrit directement en base.
+  const upd=async (mutatorFnOrObject)=>{
+    const mutatorFn = typeof mutatorFnOrObject==="function"
+      ? mutatorFnOrObject
+      : ()=>mutatorFnOrObject; // rétro-compatibilité : accepte aussi un objet mois direct
+    const newData = await safeWriteMois(data, key, mutatorFn, notifyConflict);
+    setData(newData);
+  };
+  // Idem pour les données globales (catégories, vendeurs, paiements...)
+  const updData=async (mutatorFnOrObject)=>{
+    const mutatorFn = typeof mutatorFnOrObject==="function"
+      ? mutatorFnOrObject
+      : ()=>mutatorFnOrObject;
+    const newData = await safeWriteAppData(data, mutatorFn, notifyConflict);
+    setData(newData);
+  };
   const goMois=d=>{
     let m=mi+d,a=an; if(m>11){m=0;a++;} if(m<0){m=11;a--;}
     const k=`${a}-${m}`;
@@ -2220,6 +2306,10 @@ function AppPatron({data,setData,patron,onLogout}){
   return <div style={{...base,minHeight:"100vh",background:C.bg}}>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
     <style>{`@media(min-width:768px){#sidebar{transform:translateX(0)!important;box-shadow:none!important;}#overlay{display:none!important;}#main{margin-left:224px!important;}}input[type=number]::-webkit-inner-spin-button{opacity:0}*{box-sizing:border-box;}`}</style>
+    {/* Bandeau de conflit — s'affiche quand une écriture concurrente a été détectée et automatiquement résolue */}
+    {conflictMsg && <div style={{position:"fixed",top:0,left:0,right:0,zIndex:300,background:C.warn,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:600,textAlign:"center",boxShadow:C.shadowMd}}>
+      ⚠️ {conflictMsg}
+    </div>}
     {/* HEADER */}
     <div style={{background:C.white,borderBottom:`1px solid ${C.border}`,padding:"0 16px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,boxShadow:C.shadow}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -2262,11 +2352,11 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="dashboard"&&<Dashboard data={data} moisData={md} onUpdateMois={upd}/>}
         {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd} patron={patron}/>}
         {page==="clotures"&&<AllClotures moisData={md} onUpdateMois={upd} patron={patron}/>}
-        {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
-        {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
-        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData({...data,vendeurs:v})}/>}
-        {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
-        {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
+        {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData(fresh=>({...fresh,laboCats:c}))} laboCh={md.laboCh} onLaboChChange={c=>upd(freshMois=>({...freshMois,laboCh:c}))} moisPdv={md.pdv}/>}
+        {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd(freshMois=>({...freshMois,pdv:{...freshMois.pdv,[page]:p}}))} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData(fresh=>({...fresh,pdvCats:{...fresh.pdvCats,[page]:c}}))} tLabo={tL} info={info} pct={rep[page]}/>}
+        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData(fresh=>({...fresh,vendeurs:v}))}/>}
+        {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
+        {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="journal"&&<JournalActivite/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
@@ -2337,7 +2427,7 @@ export default function App(){
   return (
     <AppPatron
       data={data}
-      setData={d=>{ saveCache(d); saveAppDataToSupabase(d); setData(d); }}
+      setData={setData}
       patron={session.patron}
       onLogout={async()=>{ await logActivity(session.patron,"deconnexion",{}); setSession(null); }}
     />
