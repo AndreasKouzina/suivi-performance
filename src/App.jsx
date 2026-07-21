@@ -470,6 +470,69 @@ function caDepuisClotures(clotures=[]){
   return clotures.reduce((s,cl)=>s+cl.modes.reduce((a,m)=>a+n(m.montant),0),0);
 }
 
+// ─── OUTILS DE PILOTAGE (identification des postes de charge dominants) ──────
+
+// Total des charges directes cumulées sur tous les PDV pour un mois donné.
+function totalChargesDirectesPDV(moisPdv, pdvCats){
+  return PDV_LIST.reduce((s,p)=>s + totalDirect(pdvCats[p.id]||[], moisPdv[p.id]?.vars), 0);
+}
+
+// Calcule, pour un mois donné, le montant de CHAQUE sous-catégorie de charge
+// (labo + tous les PDV confondus), en les regroupant par label pour que
+// "Loyers" du labo et "Loyers" d'un PDV comptent ensemble s'ils portent le
+// même nom — sinon on distingue par "label (source)".
+function ventilationCharges(data, moisObj){
+  const map = {}; // clé -> { label, montant, groupe }
+  const addTo = (key, label, montant, groupe) => {
+    if(!map[key]) map[key] = { label, montant:0, groupe };
+    map[key].montant += montant;
+  };
+  // Labo
+  (data.laboCats||[]).forEach(cat=>{
+    const montant = montantCat(cat, moisObj.laboCh);
+    if(montant>0) addTo(`labo:${cat.id}`, `${cat.label} (Labo)`, montant, cat.groupe);
+  });
+  // Chaque PDV
+  PDV_LIST.forEach(p=>{
+    const cats = data.pdvCats[p.id]||[];
+    cats.forEach(cat=>{
+      const montant = montantCat(cat, moisObj.pdv[p.id]?.vars);
+      if(montant>0) addTo(`${p.id}:${cat.id}`, `${cat.label} (${p.nom})`, montant, cat.groupe);
+    });
+  });
+  return map;
+}
+
+// Calcule le Top N des charges du mois actif, avec comparaison à la moyenne
+// des `histCount` mois précédents pour détecter les postes en dérive.
+function topCharges(data, moisActif, moisKeyActif, topN=8, histCount=3){
+  const current = ventilationCharges(data, moisActif);
+
+  // Moyenne des mois précédents disponibles (jusqu'à histCount mois)
+  const [a,m] = moisKeyActif.split("-").map(Number);
+  const prevKeys = [];
+  for(let i=1;i<=histCount;i++){
+    let mm=m-i, aa=a;
+    while(mm<0){ mm+=12; aa--; }
+    prevKeys.push(`${aa}-${mm}`);
+  }
+  const histMoisList = prevKeys.map(k=>data.mois[k]).filter(Boolean).map(fillPdvKeys);
+  const histVentilations = histMoisList.map(hm=>ventilationCharges(data, hm));
+
+  const rows = Object.entries(current).map(([key,{label,montant,groupe}])=>{
+    const histValues = histVentilations.map(v=>v[key]?.montant||0);
+    const histAvg = histValues.length>0 ? histValues.reduce((s,v)=>s+v,0)/histValues.length : null;
+    let ecartPct = null;
+    if(histAvg!==null && histAvg>0){
+      ecartPct = ((montant-histAvg)/histAvg)*100;
+    }
+    return { key, label, montant, groupe, histAvg, ecartPct, isAnomalie: ecartPct!==null && ecartPct>=50 };
+  });
+
+  rows.sort((r1,r2)=>r2.montant-r1.montant);
+  return rows.slice(0, topN);
+}
+
 // ─── STYLES ───────────────────────────────────────────────────────────────────
 const C={
   bg:"#f8f9fa",white:"#fff",border:"#e9ecef",
@@ -1887,6 +1950,85 @@ function PanneauPDV({pdvMois,onPdvChange,pdvCats,onPdvCatChange,tLabo,info,pct})
   </div>;
 }
 
+// ─── CASCADE RÉSULTAT (CA → Marge brute → Résultat net) ──────────────────────
+// Vue compacte, sans jargon, qui montre le chemin entre le CA et le résultat
+// net : où l'argent part, étape par étape. Objectif : qu'un chef d'entreprise
+// comprenne en 5 secondes d'où vient un résultat net éloigné du CA, sans
+// avoir à ouvrir chaque point de vente un par un.
+function CascadeResultat({tCA, totalMat, tMB, autresChargesLabo, totalChargesPDV, tNet}){
+  const rows = [
+    { label:"CA total", val:tCA, kind:"start" },
+    { label:"− Matières premières", val:-totalMat, kind:"neg" },
+    { label:"= Marge brute", val:tMB, kind:"subtotal" },
+    { label:"− Autres charges labo (loyers, salaires, assurances...)", val:-autresChargesLabo, kind:"neg" },
+    { label:"− Charges directes des points de vente", val:-totalChargesPDV, kind:"neg" },
+    { label:"= Résultat net", val:tNet, kind:"total" },
+  ];
+  const maxAbs = Math.max(...rows.map(r=>Math.abs(r.val)), 1);
+  return <Card style={{marginBottom:20}}>
+    <SectionHead>🧭 D'où vient ce résultat ?</SectionHead>
+    <div style={{display:"flex",flexDirection:"column",gap:2}}>
+      {rows.map((r,i)=>{
+        const isBold = r.kind==="subtotal"||r.kind==="total"||r.kind==="start";
+        const color = r.kind==="neg" ? C.red : (r.val>=0?C.primary:C.red);
+        const barPct = Math.min(100, Math.abs(r.val)/maxAbs*100);
+        return <div key={i} style={{padding:"8px 0",borderTop:r.kind==="subtotal"||r.kind==="total"?`1.5px solid ${C.border}`:"none"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+            <span style={{fontSize:13,fontWeight:isBold?700:400,color:isBold?C.text:C.textMuted}}>{r.label}</span>
+            <span style={{fontSize:isBold?15:13,fontWeight:isBold?700:600,color}}>
+              {r.val>=0&&r.kind!=="neg"?"":r.val<0?"":"+"}{r.val.toLocaleString("fr-FR",{maximumFractionDigits:0})} €
+            </span>
+          </div>
+          <div style={{background:C.bg,borderRadius:3,height:5,overflow:"hidden"}}>
+            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:r.kind==="neg"?C.accent:(r.val>=0?C.primaryMuted:C.red),transition:"width 0.5s"}}/>
+          </div>
+        </div>;
+      })}
+    </div>
+  </Card>;
+}
+
+// ─── TOP CHARGES (identification des postes dominants pour agir dessus) ──────
+// Classement des plus grosses charges du mois, tous PDV + labo confondus,
+// avec comparaison à la moyenne des 3 mois précédents pour repérer d'un coup
+// d'œil un poste qui dérive (ex: loyer trimestriel mal lissé, dépense
+// dupliquée...). C'est le cœur de l'outil de pilotage : voir vite où va
+// l'argent pour pouvoir agir dessus.
+function TopChargesPanel({rows, tCA}){
+  if(rows.length===0) return null;
+  const maxMontant = Math.max(...rows.map(r=>r.montant), 1);
+  return <Card style={{marginBottom:20}}>
+    <SectionHead>🔎 Top charges du mois</SectionHead>
+    <div style={{fontSize:11,color:C.textMuted,marginBottom:14}}>
+      Les postes qui pèsent le plus ce mois-ci, comparés à leur moyenne des 3 derniers mois. 🔴 = poste en forte hausse (+50% ou plus) à vérifier en priorité.
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {rows.map(r=>{
+        const barPct = Math.min(100, r.montant/maxMontant*100);
+        const pctCA = tCA>0 ? r.montant/tCA*100 : 0;
+        return <div key={r.key}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              {r.isAnomalie && <span title="Forte hausse vs les 3 derniers mois" style={{fontSize:13,flexShrink:0}}>🔴</span>}
+              <span style={{fontSize:13,fontWeight:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+              {r.ecartPct!==null && <span style={{fontSize:11,fontWeight:600,color:r.isAnomalie?C.red:(r.ecartPct<0?C.green:C.textLight)}}>
+                {r.ecartPct>0?"+":""}{r.ecartPct.toFixed(0)}%
+              </span>}
+              <span style={{fontSize:13,fontWeight:700,color:C.text,minWidth:80,textAlign:"right"}}>{r.montant.toLocaleString("fr-FR",{maximumFractionDigits:0})} €</span>
+            </div>
+          </div>
+          <div style={{background:C.bg,borderRadius:3,height:6,overflow:"hidden"}}>
+            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:r.isAnomalie?C.red:C.primaryMuted,transition:"width 0.5s"}}/>
+          </div>
+          <div style={{fontSize:10,color:C.textLight,marginTop:2}}>{pctCA.toFixed(1)}% du CA total</div>
+        </div>;
+      })}
+    </div>
+  </Card>;
+}
+
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({data,moisData,onUpdateMois}){
   const [montantEvent,setMontantEvent]=useState("");
@@ -1906,6 +2048,12 @@ function Dashboard({data,moisData,onUpdateMois}){
   const sorted=[...pdvs].sort((a,b)=>b.c.res-a.c.res);
   const today=todayKey();
   const cloturesDuJour=PDV_LIST.flatMap(p=>(moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today));
+
+  // Outils de pilotage : décomposition CA→résultat + top charges du mois
+  const totalChargesPDV = totalChargesDirectesPDV(moisData.pdv, data.pdvCats);
+  const autresChargesLabo = tL - totalMat;
+  const topChargesRows = topCharges(data, moisData, data.active, 8, 3);
+
 
   // CORRECTIF ANTI-ÉCRASEMENT : onUpdateMois (= upd, voir AppPatron) recharge
   // déjà Supabase juste avant d'écrire et applique ce mutateur sur le mois
@@ -1938,7 +2086,12 @@ function Dashboard({data,moisData,onUpdateMois}){
       <KPICard label="Marge brute" value={`${pctMB.toFixed(1)}%`} sub={<Badge val={pctMB}/>} color={C.primary}/>
       <KPICard label="Résultat net" value={`${tNet.toLocaleString("fr-FR")} €`} sub={<Badge val={tCA>0?tNet/tCA*100:0}/>} color={tNet>=0?C.green:C.red}/>
       <KPICard label="Charges labo" value={`${tL.toLocaleString("fr-FR")} €`} color={C.accent}/>
+      <KPICard label="Charges directes PDV" value={`${totalChargesPDV.toLocaleString("fr-FR")} €`} color={C.accent}/>
     </div>
+
+    <CascadeResultat tCA={tCA} totalMat={totalMat} tMB={tMB} autresChargesLabo={autresChargesLabo} totalChargesPDV={totalChargesPDV} tNet={tNet}/>
+    <TopChargesPanel rows={topChargesRows} tCA={tCA}/>
+
     <Card style={{background:C.fixeLight,marginBottom:20}} pad={16}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div style={{fontSize:13,fontWeight:700,color:C.fixe}}>🎉 CA Événementiel ce mois</div>
