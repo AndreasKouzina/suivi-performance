@@ -126,6 +126,7 @@ function fillPdvKeys(moisObj){
   });
   if(!pdv.evenementiel) pdv.evenementiel = {ca:0, encaissements:[]};
   if(!pdv._depenses) pdv._depenses = [];
+  if(!pdv._rapprochements) pdv._rapprochements = [];
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
 }
 function initLocal(){
@@ -320,16 +321,21 @@ function parseCicCsv(text){
   for(const line of lines){
     const parts=line.split(";");
     if(parts.length<5) continue;
-    const [dateOp,dateVal,debit,credit,libelle] = parts;
+    const [dateOp,dateVal,debit,credit,libelle,solde] = parts;
     if(!/^\d{2}\/\d{2}\/\d{4}$/.test(dateOp)) continue;
     const montantDebit = debit ? Math.abs(n(debit.replace(",","."))) : 0;
     const montantCredit = credit ? Math.abs(n(credit.replace(",","."))) : 0;
+    // Le solde n'est pas toujours présent sur chaque ligne selon l'export CIC ;
+    // on ne le garde que s'il ressemble à un nombre valide.
+    const soldeStr = (solde||"").trim();
+    const montantSolde = soldeStr && /^-?[\d\s]+([.,]\d+)?$/.test(soldeStr) ? n(soldeStr.replace(/\s/g,"").replace(",",".")) : null;
     rows.push({
       id: uid(),
       dateOp, dateVal,
       libelle: (libelle||"").trim(),
       debit: montantDebit,
       credit: montantCredit,
+      solde: montantSolde,
     });
   }
   return rows;
@@ -339,6 +345,8 @@ function parseCicCsv(text){
 function extractKeyword(libelle){
   const isComCB = /^COMCB/i.test(libelle);
   const isRemCB = /^REMCB/i.test(libelle);
+  const isSumUp = /SUMUP/i.test(libelle);
+  const isDepotEspeces = /VERSEMENT|REMISE NUM/i.test(libelle);
   const isPrlv = /^PRLV/i.test(libelle);
   const isPaiementCB = /PAIEMENT CB|PAIEMENT PSC/i.test(libelle);
   const isCheque = /^CHEQUE/i.test(libelle);
@@ -346,7 +354,7 @@ function extractKeyword(libelle){
   let clean = libelle
     .replace(/COMCB\d+|REMCB\d+|NB\d+|TPE\d+|CARTE\s?\d+|PSC\s?\d+|CB\s?\d{4}|FAC\sDU.*|RL-[\dA-Z-]+|SIRET\s?\d+|G\d{6,}/gi," ")
     .replace(/\s{2,}/g," ").trim();
-  return { isComCB, isRemCB, isPrlv, isPaiementCB, isCheque, isVir, clean };
+  return { isComCB, isRemCB, isSumUp, isDepotEspeces, isPrlv, isPaiementCB, isCheque, isVir, clean };
 }
 
 function findRuleMatch(clean, rules){
@@ -374,25 +382,124 @@ function moisLissage(startKey, count){
 function hashRow(row){
   return `${row.dateOp}|${row.libelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
 }
+// Retourne un Map hash -> solde (quand connu) pour les lignes déjà importées.
+// Utilisé à la fois pour exclure les doublons ET pour retrouver, en cas de
+// chevauchement entre deux imports, le solde bancaire juste avant la première
+// ligne réellement NOUVELLE de cet import — indispensable pour que la
+// Vérification A ne se déclenche pas à tort à cause du chevauchement.
 async function checkDuplicateHashes(rows){
   try{
     const hashes = rows.map(hashRow);
-    const dup = new Set();
+    const dup = new Map(); // hash -> solde connu (ou null si non stocké)
     for(let i=0;i<hashes.length;i+=200){
       const batch = hashes.slice(i,i+200);
-      const { data, error } = await supabase.from("imported_lines").select("hash").in("hash", batch);
-      if(!error && data) data.forEach(d=>dup.add(d.hash));
+      const { data, error } = await supabase.from("imported_lines").select("hash, solde").in("hash", batch);
+      if(!error && data) data.forEach(d=>dup.set(d.hash, d.solde ?? null));
     }
     return dup;
-  }catch(err){ console.error("check duplicates error",err); return new Set(); }
+  }catch(err){ console.error("check duplicates error",err); return new Map(); }
 }
 async function markRowsImported(rows){
   try{
-    const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString() }));
+    const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString(), solde: r.solde ?? null }));
     for(let i=0;i<records.length;i+=200){
       await supabase.from("imported_lines").upsert(records.slice(i,i+200));
     }
   }catch(err){ console.error("mark imported error",err); }
+}
+
+// ─── RAPPROCHEMENT BANCAIRE ────────────────────────────────────────────────────
+// Deux vérifications complémentaires, faites sur les données BRUTES du CSV
+// (avant tout classement manuel) :
+//
+// A) Le solde : on additionne les mouvements du fichier et on vérifie qu'on
+//    retombe sur le solde de fin annoncé par la banque. Ça confirme que le
+//    fichier a été lu en entier et sans erreur — indépendamment de la façon
+//    dont chaque ligne a ensuite été catégorisée.
+//
+//    Point important : quand un import chevauche partiellement un import
+//    précédent (cas courant et volontaire, pour ne rien louper), les lignes
+//    en doublon ne doivent PAS être comptées une seconde fois dans le calcul.
+//    On se sert du solde déjà connu (stocké lors du import précédent, table
+//    imported_lines) de la DERNIÈRE ligne doublon comme point de départ fiable
+//    du calcul, et on n'additionne ensuite que les lignes réellement
+//    NOUVELLES de cet import. Si aucune ligne doublon n'a de solde connu (premier
+//    import, ou chevauchement total), on retombe sur la première ligne du
+//    fichier comme avant.
+//
+// B) L'exhaustivité : on vérifie qu'aucun crédit inhabituel (un encaissement
+//    qui n'est ni un règlement CB/SumUp/dépôt espèces déjà couvert par les
+//    clôtures) n'est resté sans classement — car ce type de ligne doit
+//    toujours attirer l'attention du patron (remboursement fournisseur, etc.)
+//
+// `duplicateMap` : Map hash -> solde connu, retournée par checkDuplicateHashes.
+// `allRows` : TOUTES les lignes lues du fichier (avant exclusion des doublons),
+//             dans l'ordre chronologique du CSV — nécessaire pour retrouver la
+//             frontière entre "déjà connu" et "nouveau".
+function calculerRapprochement(allRows, duplicateMap, pending){
+  const rowsAvecSolde = allRows.filter(r=>r.solde!==null && r.solde!==undefined);
+  let verifSolde = null;
+
+  if(rowsAvecSolde.length>=1){
+    // On cherche la DERNIÈRE ligne (dans l'ordre du fichier) qui est à la
+    // fois un doublon connu ET dont le solde stocké est disponible : c'est
+    // notre point de départ fiable, juste avant la zone réellement nouvelle.
+    let pointDepart = null; // { solde, index }
+    rowsAvecSolde.forEach((r,idx)=>{
+      const isDup = duplicateMap.has(hashRow(r));
+      const soldeConnu = duplicateMap.get(hashRow(r));
+      if(isDup && soldeConnu!==null && soldeConnu!==undefined){
+        pointDepart = { solde: soldeConnu, index: idx };
+      }
+    });
+
+    let soldeDepart, ligneDepartIdx;
+    if(pointDepart){
+      // On repart du solde connu de la dernière ligne doublon, et on
+      // n'additionne que les lignes qui suivent (les nouvelles).
+      soldeDepart = pointDepart.solde;
+      ligneDepartIdx = pointDepart.index + 1;
+    } else {
+      // Pas de doublon avec solde connu (premier import, ou aucune ligne
+      // chevauchante) : on repart comme avant, de la première ligne du fichier.
+      const premiere = rowsAvecSolde[0];
+      soldeDepart = premiere.solde - premiere.credit + premiere.debit;
+      ligneDepartIdx = 0;
+    }
+
+    const derniere = rowsAvecSolde[rowsAvecSolde.length-1];
+    const rowsAConsiderer = rowsAvecSolde.slice(ligneDepartIdx);
+    const totalMouvements = rowsAConsiderer.reduce((s,r)=>s + r.credit - r.debit, 0);
+    const soldeTheorique = soldeDepart + totalMouvements;
+    const soldeAnnonce = derniere.solde;
+    const ecart = Math.round((soldeTheorique - soldeAnnonce) * 100) / 100;
+    verifSolde = {
+      possible: true,
+      soldeDepart, soldeTheorique, soldeAnnonce, ecart,
+      coherent: Math.abs(ecart) < 0.01,
+      chevauchementDetecte: !!pointDepart,
+      nbLignesExclues: pointDepart ? pointDepart.index+1 : 0,
+    };
+  } else {
+    verifSolde = { possible:false };
+  }
+
+  // Vérification B — exhaustivité des crédits inhabituels
+  // On exclut les crédits déjà couverts par les clôtures (REMCB, SumUp,
+  // dépôts d'espèces) : ceux-là sont normaux et ne doivent jamais remonter
+  // ici. Seuls les AUTRES crédits (remboursements fournisseurs, etc.) sans
+  // classement choisi comptent comme "à vérifier". On ne regarde que les
+  // lignes non-doublons (celles réellement soumises au classement).
+  const rowsNonDoublons = allRows.filter(r=>!duplicateMap.has(hashRow(r)));
+  const creditsInhabituelsNonClasses = rowsNonDoublons.filter(r=>{
+    if(r.credit<=0) return false;
+    const k = extractKeyword(r.libelle);
+    if(k.isRemCB || k.isSumUp || k.isDepotEspeces) return false;
+    const choix = pending[r.id];
+    return !choix || choix.type==="ignore";
+  });
+
+  return { verifSolde, creditsInhabituelsNonClasses };
 }
 
 // ─── AUTHENTIFICATION PATRONS (via fonctions sécurisées Supabase) ────────────
@@ -417,29 +524,6 @@ async function updatePatronPassword(patronId, newPassword){
     if(error) return false;
     return true;
   }catch(err){ console.error("update password error",err); return false; }
-}
-
-// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
-async function logActivity(patron, action, detail={}){
-  try{
-    await supabase.from("activity_log").insert({
-      id: uid(),
-      patron_id: patron.id,
-      patron_nom: patron.nom,
-      action,
-      detail,
-      created_at: new Date().toISOString()
-    });
-  }catch(err){ console.error("log activity error",err); }
-}
-
-async function loadActivityLog(limit=100){
-  try{
-    const { data, error } = await supabase.from("activity_log")
-      .select("*").order("created_at", {ascending:false}).limit(limit);
-    if(error) return [];
-    return data||[];
-  }catch(err){ console.error("load activity log error",err); return []; }
 }
 
 
@@ -1034,7 +1118,7 @@ function GestionPaiements({paiements, onChange}){
 function ImportCSV({data, md, onApplied}){
   const [text,setText]=useState("");
   const [rows,setRows]=useState(null); // résultat parsing
-  const [duplicateHashes,setDuplicateHashes]=useState(new Set());
+  const [duplicateHashes,setDuplicateHashes]=useState(new Map());
   const [checkingDup,setCheckingDup]=useState(false);
   const [forceInclude,setForceInclude]=useState({}); // {rowId:true} pour inclure malgré le doublon
   const [rules,setRules]=useState({});
@@ -1077,6 +1161,10 @@ function ImportCSV({data, md, onApplied}){
 
     if(k.isRemCB){
       auto = { type:"ignore", reason:"Encaissement CB — déjà couvert par les clôtures de caisse" };
+    } else if(k.isSumUp && row.credit>0){
+      auto = { type:"ignore", reason:"Versement SumUp — déjà couvert par les clôtures de caisse" };
+    } else if(k.isDepotEspeces && row.credit>0){
+      auto = { type:"ignore", reason:"Dépôt d'espèces — déjà couvert par les clôtures de caisse" };
     } else if(k.isComCB){
       auto = { type:"com_cb" };
     } else {
@@ -1095,6 +1183,12 @@ function ImportCSV({data, md, onApplied}){
   const comCbLines = classified.filter(c=>c.auto && c.auto.type==="com_cb");
   const totalComCB = comCbLines.reduce((s,c)=>s+c.row.debit,0);
   const credits = classified.filter(c=>!c.auto && c.row.credit>0);
+
+  // Rapprochement bancaire : calculé sur TOUTES les lignes lues du fichier
+  // (rows, pas effectiveRows) pour pouvoir détecter la frontière du
+  // chevauchement avec un import précédent, en tenant compte des choix de
+  // classement en cours (pending).
+  const rapprochement = rows ? calculerRapprochement(rows, duplicateHashes, pending) : null;
 
   // Trouve l'id du mode de paiement "carte bancaire" parmi les modes configurés
   const cbModeId = (()=>{
@@ -1194,6 +1288,27 @@ function ImportCSV({data, md, onApplied}){
       }
     });
 
+    // 4bis. Enregistrer le résultat du rapprochement bancaire de cet import
+    // (Vérification A uniquement — objective, indépendante du classement)
+    // dans un petit journal consultable ensuite dans l'onglet dédié.
+    if(rapprochement && rapprochement.verifSolde.possible){
+      const entry = {
+        id: uid(),
+        date: todayKey(),
+        dateLabel: new Date().toLocaleDateString("fr-FR"),
+        coherent: rapprochement.verifSolde.coherent,
+        ecart: rapprochement.verifSolde.ecart,
+        soldeTheorique: rapprochement.verifSolde.soldeTheorique,
+        soldeAnnonce: rapprochement.verifSolde.soldeAnnonce,
+        chevauchementDetecte: rapprochement.verifSolde.chevauchementDetecte,
+        nbLignesExclues: rapprochement.verifSolde.nbLignesExclues,
+        nbLignes: effectiveRows.length,
+        nbCreditsInhabituels: rapprochement.creditsInhabituelsNonClasses.length,
+      };
+      const startMois = moisCache[startKey];
+      moisCache[startKey] = {...startMois, pdv:{...startMois.pdv, _rapprochements:[...(startMois.pdv._rapprochements||[]), entry]}};
+    }
+
     // 4. Sauvegarder tous les mois touchés + pdvCats si modifiés
     for(const [key,moisObj] of Object.entries(moisCache)){
       await saveMoisToSupabase(key, moisObj);
@@ -1268,6 +1383,41 @@ function ImportCSV({data, md, onApplied}){
         {reconnues.length} reconnues automatiquement · {ignorees.length} ignorées (CA déjà saisi) · {aClasser.length} à classer
       </div>
     </Card>
+
+    {/* Rapprochement bancaire — Vérification A (solde) + B (exhaustivité) */}
+    {rapprochement && <Card style={{marginBottom:16, background: rapprochement.verifSolde.possible ? (rapprochement.verifSolde.coherent?C.greenLight:C.redLight) : C.bg, border: rapprochement.verifSolde.possible ? `1px solid ${rapprochement.verifSolde.coherent?C.green:C.red}33` : `1px solid ${C.border}`}}>
+      <SectionHead>🔍 Rapprochement bancaire</SectionHead>
+      {rapprochement.verifSolde.possible ? (
+        rapprochement.verifSolde.coherent ? (
+          <div>
+            <div style={{fontSize:13,color:C.green,fontWeight:600}}>✅ Solde cohérent avec le relevé — le fichier a été lu en entier, sans écart.</div>
+            {rapprochement.verifSolde.chevauchementDetecte && <div style={{fontSize:11,color:C.textMuted,marginTop:4}}>
+              ℹ️ Chevauchement avec un import précédent détecté et pris en compte automatiquement ({rapprochement.verifSolde.nbLignesExclues} ligne(s) déjà connue(s) exclues du calcul).
+            </div>}
+          </div>
+        ) : (
+          <div>
+            <div style={{fontSize:13,color:C.red,fontWeight:700,marginBottom:6}}>⚠️ Écart de {rapprochement.verifSolde.ecart.toLocaleString("fr-FR")} € détecté avec le solde du relevé.</div>
+            <div style={{fontSize:12,color:C.textMuted,marginBottom:8}}>
+              Solde théorique calculé : {rapprochement.verifSolde.soldeTheorique.toLocaleString("fr-FR")} € · Solde annoncé par la banque : {rapprochement.verifSolde.soldeAnnonce.toLocaleString("fr-FR")} €.
+              {rapprochement.verifSolde.chevauchementDetecte && ` (${rapprochement.verifSolde.nbLignesExclues} ligne(s) de chevauchement déjà exclues du calcul.)`}
+            </div>
+            <div style={{fontSize:11,color:C.textMuted,background:C.white,borderRadius:8,padding:"8px 10px"}}>
+              <strong>Que faire ?</strong> Cet écart ne dépend pas de la façon dont vous classez vos dépenses — il indique un souci avec le fichier lui-même. Vérifiez dans l'ordre :
+              <br/>1. Que la période exportée depuis CIC ne laisse aucun trou avec le précédent import.
+              <br/>2. Que le fichier n'a pas été coupé ou tronqué à l'export.
+              <br/>3. Si le doute persiste, ré-exportez un CSV frais et réimportez-le (les doublons seront automatiquement exclus).
+            </div>
+          </div>
+        )
+      ) : (
+        <div style={{fontSize:12,color:C.textMuted}}>ℹ️ Ce relevé ne contient pas de colonne Solde exploitable — vérification du solde non disponible pour cet import.</div>
+      )}
+      {rapprochement.creditsInhabituelsNonClasses.length>0 && <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+        <div style={{fontSize:12,fontWeight:600,color:C.accent}}>⚠️ {rapprochement.creditsInhabituelsNonClasses.length} encaissement(s) inhabituel(s) à vérifier</div>
+        <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>Ni un règlement CB/SumUp ni un dépôt d'espèces — probablement un remboursement fournisseur ou similaire. Classez-les ci-dessous dans "💰 Encaissements à classer".</div>
+      </div>}
+    </Card>}
 
     {reconnues.length>0 && <Card style={{marginBottom:16}}>
       <SectionHead>🟢 Classées automatiquement</SectionHead>
@@ -1637,6 +1787,56 @@ function PanneauDepenses({data, md, onUpdateMois}){
 }
 
 // ─── HISTORIQUE DES CLÔTURES + RÉCAP MODES DE PAIEMENT ───────────────────────
+// ─── RAPPROCHEMENT BANCAIRE (onglet dédié) ────────────────────────────────────
+// Vue consultable à tout moment (indépendamment du moment de l'import) de
+// l'état de cohérence du mois affiché : historique des vérifications de solde
+// faites à chaque import CSV de ce mois.
+function PanneauRapprochement({moisData}){
+  const historique = [...(moisData.pdv._rapprochements||[])].reverse();
+  const dernier = historique[0];
+
+  return <div>
+    <Card style={{marginBottom:20, background: dernier ? (dernier.coherent?C.greenLight:C.redLight) : C.bg, border: dernier ? `1px solid ${dernier.coherent?C.green:C.red}33` : `1px solid ${C.border}`}} pad={20}>
+      <div style={{fontSize:11,fontWeight:600,color:C.textMuted,letterSpacing:0.8,textTransform:"uppercase",marginBottom:8}}>État actuel du mois</div>
+      {!dernier ? (
+        <div style={{fontSize:14,color:C.textMuted}}>Aucun import CSV avec vérification de solde n'a encore été fait ce mois-ci.</div>
+      ) : dernier.coherent ? (
+        <div>
+          <div style={{fontSize:20,fontWeight:800,color:C.green,marginBottom:4}}>✅ Solde cohérent</div>
+          <div style={{fontSize:12,color:C.textMuted}}>Dernière vérification le {dernier.dateLabel} — {dernier.nbLignes} lignes lues, aucun écart avec le relevé bancaire.</div>
+        </div>
+      ) : (
+        <div>
+          <div style={{fontSize:20,fontWeight:800,color:C.red,marginBottom:4}}>⚠️ Écart de {dernier.ecart.toLocaleString("fr-FR")} €</div>
+          <div style={{fontSize:12,color:C.textMuted}}>Détecté le {dernier.dateLabel} — vérifiez que le dernier fichier importé couvre bien toute la période sans coupure.</div>
+        </div>
+      )}
+      {dernier && dernier.nbCreditsInhabituels>0 && <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`,fontSize:12,color:C.accent,fontWeight:600}}>
+        ⚠️ {dernier.nbCreditsInhabituels} encaissement(s) inhabituel(s) restaient à vérifier lors du dernier import — pensez à les classer dans l'onglet Import CSV si ce n'est pas déjà fait.
+      </div>}
+    </Card>
+
+    <SectionHead>Historique des vérifications ({historique.length})</SectionHead>
+    {historique.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucun historique pour ce mois</div></Card>}
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {historique.map(h=>(
+        <Card key={h.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:13}}>{h.coherent?"✅ Solde cohérent":`⚠️ Écart de ${h.ecart.toLocaleString("fr-FR")} €`}</div>
+              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{h.dateLabel} · {h.nbLignes} lignes{h.nbCreditsInhabituels>0?` · ${h.nbCreditsInhabituels} encaissement(s) inhabituel(s)`:""}</div>
+            </div>
+            <div style={{fontSize:11,color:C.textLight,textAlign:"right"}}>
+              Théorique : {h.soldeTheorique.toLocaleString("fr-FR")} €<br/>
+              Relevé : {h.soldeAnnonce.toLocaleString("fr-FR")} €
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  </div>;
+}
+
 function AllClotures({moisData, onUpdateMois}){
   const [filtreDate,setFiltreDate]=useState("");
   const [editing,setEditing]=useState(null); // clôture en cours de modification
@@ -2309,7 +2509,6 @@ function MonCompte({patron, onLogout}){
     if(pwd!==pwd2){ setMsg({ok:false,txt:"Les deux mots de passe ne correspondent pas"}); return; }
     setLoading(true);
     const ok=await updatePatronPassword(patron.id, pwd);
-    await logActivity(patron,"mot_de_passe",{});
     setLoading(false);
     if(ok){ setMsg({ok:true,txt:"Mot de passe changé ! Reconnectez-vous avec votre nouveau mot de passe."}); setPwd(""); setPwd2(""); }
     else{ setMsg({ok:false,txt:"Erreur lors du changement"}); }
@@ -2343,57 +2542,6 @@ function MonCompte({patron, onLogout}){
         Se déconnecter
       </button>
     </Card>
-  </div>;
-}
-
-// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
-function JournalActivite(){
-  const [logs,setLogs]=useState([]);
-  const [loading,setLoading]=useState(true);
-
-  useEffect(()=>{
-    loadActivityLog(200).then(data=>{ setLogs(data); setLoading(false); });
-  },[]);
-
-  const actionLabel={
-    connexion:"🔐 Connexion",
-    deconnexion:"🚪 Déconnexion",
-    import_csv:"📥 Import CSV",
-    depense_ajout:"💸 Dépense ajoutée",
-    depense_suppression:"🗑️ Dépense supprimée",
-    cloture_modif:"✏️ Clôture modifiée",
-    cloture_suppression:"🗑️ Clôture supprimée",
-    vendeur_ajout:"🧑‍💼 Vendeur ajouté",
-    vendeur_suppression:"🗑️ Vendeur supprimé",
-    mot_de_passe:"🔑 Mot de passe changé",
-  };
-
-  if(loading) return <Card pad={24}><div style={{color:C.textMuted,fontSize:13}}>Chargement du journal…</div></Card>;
-  if(logs.length===0) return <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune activité enregistrée</div></Card>;
-
-  return <div>
-    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      {logs.map(log=>{
-        const date=new Date(log.created_at);
-        const dateStr=date.toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
-        const heureStr=date.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
-        return <Card key={log.id} pad={14}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6}}>
-            <div>
-              <div style={{fontWeight:600,fontSize:13}}>{actionLabel[log.action]||log.action}</div>
-              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>par <strong>{log.patron_nom}</strong> · {dateStr} à {heureStr}</div>
-              {Object.keys(log.detail||{}).length>0 && <div style={{marginTop:6,display:"flex",gap:6,flexWrap:"wrap"}}>
-                {Object.entries(log.detail).map(([k,v])=>(
-                  <span key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.textMuted}}>
-                    {k} : {typeof v==="number"?v.toLocaleString("fr-FR")+" €":String(v)}
-                  </span>
-                ))}
-              </div>}
-            </div>
-          </div>
-        </Card>;
-      })}
-    </div>
   </div>;
 }
 
@@ -2453,7 +2601,7 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
     {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
-    {id:"journal",label:"Journal",icon:"📜"},
+    {id:"rapprochement",label:"Rapprochement",icon:"🔍"},
     {id:"compte",label:"Mon compte",icon:"🔑"},
   ];
   return <div style={{...base,minHeight:"100vh",background:C.bg}}>
@@ -2484,7 +2632,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","caisse","journal","compte"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","caisse","rapprochement","compte"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -2498,7 +2646,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="caisse"?"🏦 Contrôle caisse":page==="journal"?"📜 Journal d'activité":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -2511,7 +2659,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
-        {page==="journal"&&<JournalActivite/>}
+        {page==="rapprochement"&&<PanneauRapprochement moisData={md}/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
       </div>
     </div>
@@ -2561,7 +2709,6 @@ export default function App(){
     <EcranConnexion
       onPatron={async(patron)=>{
         setSession({role:"patron", patron});
-        await logActivity(patron, "connexion", {});
       }}
       onVendeur={v=>setSession({role:"vendeur",vendeur:v})}
       vendeurs={data.vendeurs}
@@ -2582,7 +2729,7 @@ export default function App(){
       data={data}
       setData={setData}
       patron={session.patron}
-      onLogout={async()=>{ await logActivity(session.patron,"deconnexion",{}); setSession(null); }}
+      onLogout={()=>setSession(null)}
     />
   );
 }
