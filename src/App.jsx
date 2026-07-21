@@ -149,20 +149,9 @@ function ensureMois(data, key){
 function reconcilierDepenses(moisObj){
   const depenses = moisObj.pdv._depenses || [];
   if(depenses.length===0) return moisObj;
-
-  // Recalcule les vars uniquement depuis les sources fiables :
-  // 1. On ne touche pas aux vars existants qui viennent du CSV ou de l'onglet Dépenses patron
-  // 2. On s'assure juste que chaque dépense vendeur est reflétée
-  // Méthode : on compare ce qui devrait être dans vars vs ce qui y est
-  // Pour éviter les doubles comptages, on ne fait rien ici — les dépenses
-  // vendeur sont déjà appliquées au moment de la saisie.
-  // Ce flag est juste pour s'assurer que fillPdvKeys initialise bien les vars.
   return moisObj;
 }
 // Migration vers le plan comptable (catégories/sous-catégories).
-// Les anciens ids sont conservés (renommés + rattachés à leur groupe) pour que
-// les montants déjà saisis (juillet...) restent visibles. Les sous-catégories
-// manquantes sont ajoutées.
 const MIGRATION_RENAME = {
   matieres:  ["Denrées alimentaires","g601"],
   packaging: ["Emballages / contenants / vaisselle jetable","g601"],
@@ -191,7 +180,6 @@ function upgradeCatList(list){
 }
 function migrateLaboCats(data){
   if(data.catsVersion===2){
-    // Déjà migré : on s'assure juste que chaque PDV a ses catégories
     let pdvCats = {...data.pdvCats}; let changed=false;
     PDV_LIST.forEach(p=>{
       if(!pdvCats[p.id]){ pdvCats[p.id]=DEFAULT_COMPTA_CATS.map(c=>({...c})); changed=true; }
@@ -277,7 +265,6 @@ function parseCicCsv(text){
     const parts=line.split(";");
     if(parts.length<5) continue;
     const [dateOp,dateVal,debit,credit,libelle] = parts;
-    // Ignorer l'en-tête éventuel
     if(!/^\d{2}\/\d{2}\/\d{4}$/.test(dateOp)) continue;
     const montantDebit = debit ? Math.abs(n(debit.replace(",","."))) : 0;
     const montantCredit = credit ? Math.abs(n(credit.replace(",","."))) : 0;
@@ -300,7 +287,6 @@ function extractKeyword(libelle){
   const isPaiementCB = /PAIEMENT CB|PAIEMENT PSC/i.test(libelle);
   const isCheque = /^CHEQUE/i.test(libelle);
   const isVir = /^VIR /i.test(libelle);
-  // Mot-clé "propre" : on retire les codes numériques, dates, références
   let clean = libelle
     .replace(/COMCB\d+|REMCB\d+|NB\d+|TPE\d+|CARTE\s?\d+|PSC\s?\d+|CB\s?\d{4}|FAC\sDU.*|RL-[\dA-Z-]+|SIRET\s?\d+|G\d{6,}/gi," ")
     .replace(/\s{2,}/g," ").trim();
@@ -309,7 +295,6 @@ function extractKeyword(libelle){
 
 function findRuleMatch(clean, rules){
   const upper=clean.toUpperCase();
-  // recherche du mot-clé le plus long contenu dans le libellé
   let best=null, bestLen=0;
   for(const kw of Object.keys(rules)){
     if(upper.includes(kw.toUpperCase()) && kw.length>bestLen){ best=kw; bestLen=kw.length; }
@@ -333,12 +318,10 @@ function moisLissage(startKey, count){
 function hashRow(row){
   return `${row.dateOp}|${row.libelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
 }
-// Vérifie quelles lignes (par leur hash) ont déjà été importées précédemment
 async function checkDuplicateHashes(rows){
   try{
     const hashes = rows.map(hashRow);
     const dup = new Set();
-    // Supabase .in() limite raisonnable : on découpe par lots de 200
     for(let i=0;i<hashes.length;i+=200){
       const batch = hashes.slice(i,i+200);
       const { data, error } = await supabase.from("imported_lines").select("hash").in("hash", batch);
@@ -347,7 +330,6 @@ async function checkDuplicateHashes(rows){
     return dup;
   }catch(err){ console.error("check duplicates error",err); return new Set(); }
 }
-// Enregistre les lignes de cet import comme "vues" pour détecter les futurs doublons
 async function markRowsImported(rows){
   try{
     const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString() }));
@@ -407,8 +389,6 @@ async function loadActivityLog(limit=100){
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
-// Pour les charges fixes : montantFixe (récurrent) + vars[id] (dépenses ponctuelles supplémentaires)
-// Pour les charges variables : vars[id] uniquement (saisi chaque mois)
 function montantCat(cat, vars){ 
   return cat.type==="fixe" 
     ? n(cat.montantFixe) + n(vars?.[cat.id])
@@ -977,10 +957,8 @@ function ImportCSV({data, md, onApplied}){
     let auto=null;
 
     if(k.isRemCB){
-      // Encaissement CB : déjà compté dans le CA via les clôtures des vendeurs.
       auto = { type:"ignore", reason:"Encaissement CB — déjà couvert par les clôtures de caisse" };
     } else if(k.isComCB){
-      // Commission CB : traitée à part, répartie au prorata du CB encaissé par point de vente.
       auto = { type:"com_cb" };
     } else {
       const rule = findRuleMatch(k.clean, rules);
@@ -1026,7 +1004,6 @@ function ImportCSV({data, md, onApplied}){
       const choix=pending[c.row.id];
       if(!choix || choix.type==="ignore") continue;
       if(choix.type==="multi"){
-        // Répartition multi-PDV : une op par point de vente avec son montant spécifique
         (choix.repartition||[]).forEach(r=>{
           if(n(r.montant)>0){
             const cats=data.pdvCats[r.pdvId]||[];
@@ -1063,7 +1040,6 @@ function ImportCSV({data, md, onApplied}){
       const keys = moisLissage(startKey, nbMois);
       for(const k of keys){
         if(!moisCache[k]){
-          // mois futur pas encore en cache : on part d'un mois vide compatible
           moisCache[k] = initMois();
         }
         if(op.type==="labo"){
@@ -1078,7 +1054,6 @@ function ImportCSV({data, md, onApplied}){
           moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, evenementiel: {ca:(n(ev.ca)+part)}}};
         }
       }
-      // Mémoriser la règle apprise (pas pour les commissions CB, recalculées chaque fois)
       if(op._learnKeyword){
         await saveImportRule(op._learnKeyword, { type:op.type, pdvId:op.pdvId, catId:op.catId, label:op.label, lissage:op.lissage||"ponctuel", nbMois:op.nbMois });
       }
@@ -1197,7 +1172,6 @@ function ImportCSV({data, md, onApplied}){
                   if(v==="ignore") setPend(c.row.id,{type:"ignore"});
                   else if(v==="labo") setPend(c.row.id,{type:"labo",catId:allCatsLabo[0]?.id,label:allCatsLabo[0]?.label,lissage:"ponctuel"});
                   else if(v==="multi"){
-                    // Initialise avec tous les PDV à 0
                     const repartition=PDV_LIST.map(p=>({pdvId:p.id,montant:"",catId:(data.pdvCats[p.id]||[])[0]?.id}));
                     setPend(c.row.id,{type:"multi",repartition,lissage:"ponctuel"});
                   }
@@ -1840,6 +1814,7 @@ function PanneauPDV({pdvMois,onPdvChange,pdvCats,onPdvCatChange,tLabo,info,pct})
 function Dashboard({data,moisData,onUpdateMois}){
   const [montantEvent,setMontantEvent]=useState("");
   const [modeEvent,setModeEvent]=useState("");
+  const [savingEvent,setSavingEvent]=useState(false);
   const tL=totalLabo(data.laboCats,moisData.laboCh);
   const rep=repartition(moisData.pdv);
   const pdvs=PDV_LIST.map(p=>({...p,c:calcPDV(moisData.pdv[p.id],data.pdvCats[p.id],rep[p.id],tL)}));
@@ -1855,18 +1830,26 @@ function Dashboard({data,moisData,onUpdateMois}){
   const today=todayKey();
   const cloturesDuJour=PDV_LIST.flatMap(p=>(moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today));
 
-  const ajouterEvenementiel=()=>{
+  // CORRECTIF ANTI-ÉCRASEMENT : recharge Supabase juste avant d'écrire un
+  // encaissement événementiel, pour ne jamais partir d'un state React périmé
+  // qui écraserait des encaissements ajoutés entre-temps (autre onglet,
+  // saisie vendeur en parallèle, etc.).
+  const ajouterEvenementiel=async ()=>{
     if(!n(montantEvent)) return;
-    const ev = moisData.pdv.evenementiel||{ca:0,encaissements:[]};
+    setSavingEvent(true);
     const newEnc = {
       id:uid(), montant:n(montantEvent),
       modeLabel:modeEvent||"Non précisé",
       date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR")
     };
+    const remote = await loadFromSupabase();
+    const key = moisKey();
+    const freshMois = remote ? fillPdvKeys(remote.mois[key]||initMois()) : moisData;
+    const ev = freshMois.pdv.evenementiel||{ca:0,encaissements:[]};
     const encaissements = [...(ev.encaissements||[]), newEnc];
     const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
-    onUpdateMois({...moisData, pdv:{...moisData.pdv, evenementiel:{ca:newCa, encaissements}}});
-    setMontantEvent(""); setModeEvent("");
+    await onUpdateMois({...freshMois, pdv:{...freshMois.pdv, evenementiel:{ca:newCa, encaissements}}});
+    setMontantEvent(""); setModeEvent(""); setSavingEvent(false);
   };
 
   return <div>
@@ -1906,9 +1889,9 @@ function Dashboard({data,moisData,onUpdateMois}){
           <option value="Chèque">Chèque</option>
           <option value="CB">CB</option>
         </select>
-        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)||!modeEvent}
-          style={{...base,background:n(montantEvent)&&modeEvent?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)&&modeEvent?"pointer":"not-allowed"}}>
-          + Ajouter
+        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)||!modeEvent||savingEvent}
+          style={{...base,background:n(montantEvent)&&modeEvent&&!savingEvent?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)&&modeEvent&&!savingEvent?"pointer":"not-allowed"}}>
+          {savingEvent?"⏳...":"+ Ajouter"}
         </button>
       </div>
     </Card>
@@ -2003,7 +1986,7 @@ function ControleCaisse({moisData, paiements}){
     {/* Détail par mode de paiement */}
     <SectionHead>Détail par mode de paiement</SectionHead>
     <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
-      {tousLesModes.length===0 && caEvent===0 && (
+      {tousLesModes.length===0 && caEventEspeces===0 && (
         <Card pad={24} style={{textAlign:"center"}}>
           <div style={{color:C.textLight,fontSize:13}}>Aucune clôture saisie ce mois-ci</div>
         </Card>
@@ -2192,11 +2175,21 @@ function AppPatron({data,setData,patron,onLogout}){
   const [an,mi]=key.split("-").map(Number);
   const getMois=()=>fillPdvKeys(data.mois[key]||initMois());
   const md=getMois();
-  const upd=nm=>setData(prev=>{
-    const u={...prev,mois:{...prev.mois,[key]:nm}};
-    saveCache(u); saveMoisToSupabase(key,nm);
-    return u;
-  });
+
+  // CORRECTIF ANTI-ÉCRASEMENT : avant d'écrire le mois actif dans Supabase,
+  // on recharge d'abord la version la plus récente en base et on fusionne
+  // la modification demandée par-dessus, au lieu d'écraser directement avec
+  // le state local (potentiellement périmé si un autre onglet, un import CSV,
+  // ou une saisie vendeur a modifié les données entre-temps).
+  const upd=async (nm)=>{
+    const remote = await loadFromSupabase();
+    setData(prev=>{
+      const base = remote ? {...prev, mois:{...prev.mois, [key]: fillPdvKeys(remote.mois[key]||initMois())}} : prev;
+      const u={...base,mois:{...base.mois,[key]:nm}};
+      saveCache(u); saveMoisToSupabase(key,nm);
+      return u;
+    });
+  };
   const updData=nd=>{ saveCache(nd); saveAppDataToSupabase(nd); setData(nd); };
   const goMois=d=>{
     let m=mi+d,a=an; if(m>11){m=0;a++;} if(m<0){m=11;a--;}
@@ -2350,4 +2343,3 @@ export default function App(){
     />
   );
 }
-
