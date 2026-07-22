@@ -717,12 +717,25 @@ function assemblerDonneesExport(data, moisObj, moisLabel){
   const caEvenementiel = n(moisObj.pdv.evenementiel?.ca);
   const tCA = pdvCalc.reduce((s,p)=>s+p.c.ca,0) + caEvenementiel;
 
-  // 1. Charges détaillées par sous-catégorie (labo + chaque PDV), avec % du CA
+  // 1. Charges détaillées par sous-catégorie (labo + chaque PDV), avec % du CA,
+  // regroupées et triées par GROUPE COMPTABLE (1. Matières premières → 9.
+  // Amortissements) plutôt que par montant — pour une lecture structurée,
+  // cohérente avec le plan comptable déjà utilisé partout ailleurs dans l'app.
   const ventilation = ventilationCharges(data, moisObj);
-  const charges = Object.values(ventilation)
-    .map(c=>({...c, pctCA: tCA>0 ? (c.montant/tCA)*100 : 0}))
-    .sort((a,b)=>b.montant-a.montant);
-  const totalCharges = charges.reduce((s,c)=>s+c.montant,0);
+  const chargesBrutes = Object.values(ventilation).map(c=>({...c, pctCA: tCA>0 ? (c.montant/tCA)*100 : 0}));
+  const totalCharges = chargesBrutes.reduce((s,c)=>s+c.montant,0);
+
+  const groupesCharges = GROUPES_COMPTA.map(g=>{
+    const items = chargesBrutes.filter(c=>c.groupe===g.id).sort((a,b)=>b.montant-a.montant);
+    const totalGroupe = items.reduce((s,c)=>s+c.montant,0);
+    return { groupeId:g.id, groupeLabel:g.label, items, totalGroupe, pctCA: tCA>0?(totalGroupe/tCA)*100:0 };
+  }).filter(g=>g.items.length>0);
+  // Sous-catégories personnalisées sans groupe reconnu, en dernier
+  const chargesSansGroupe = chargesBrutes.filter(c=>!GROUPES_COMPTA.find(g=>g.id===c.groupe));
+  if(chargesSansGroupe.length>0){
+    const totalGroupe = chargesSansGroupe.reduce((s,c)=>s+c.montant,0);
+    groupesCharges.push({ groupeId:"autre", groupeLabel:"Autres / personnalisées", items:chargesSansGroupe, totalGroupe, pctCA: tCA>0?(totalGroupe/tCA)*100:0 });
+  }
 
   // 2. Encaissements par PDV et par mode de paiement
   const encaissementsParPdv = PDV_LIST.map(p=>{
@@ -735,6 +748,13 @@ function assemblerDonneesExport(data, moisObj, moisLabel){
     const total = Object.values(parMode).reduce((s,v)=>s+v,0);
     return { pdv:p.nom, total, pctCA: tCA>0?(total/tCA)*100:0, parMode };
   }).filter(e=>e.total>0);
+
+  // 2bis. Classement des PDV par rentabilité (CA + résultat net), pour la
+  // page dédiée "Détail par point de vente" de l'export — vue simple, sans
+  // le détail des charges (juste CA et résultat net, comme sur le Dashboard).
+  const classementPdv = [...pdvCalc]
+    .sort((a,b)=>b.c.res-a.c.res)
+    .map(p=>({ pdv:p.full, ca:p.c.ca, resultatNet:p.c.res, pctNet:p.c.pctNet }));
 
   // 3. Événementiel
   const encaissementsEvent = (moisObj.pdv.evenementiel?.encaissements||[]).map(e=>({
@@ -759,7 +779,7 @@ function assemblerDonneesExport(data, moisObj, moisLabel){
     tCA, tMB, totalMat, tL, totalChargesPDV, tNet, totalCharges,
     pctMB: tCA>0?(tMB/tCA)*100:0,
     pctNet: tCA>0?(tNet/tCA)*100:0,
-    charges, encaissementsParPdv, encaissementsEvent, depensesManuelles, caEvenementiel,
+    groupesCharges, encaissementsParPdv, classementPdv, encaissementsEvent, depensesManuelles, caEvenementiel,
   };
 }
 
@@ -781,13 +801,13 @@ function genererCsvExport(ex){
   lignes.push(`Résultat net;${nb(ex.tNet)};${pct(ex.pctNet)}`);
   lignes.push("");
 
-  lignes.push("CHARGES DÉTAILLÉES (labo + tous points de vente)");
-  lignes.push("Sous-catégorie;Groupe comptable;Montant (€);% du CA");
-  ex.charges.forEach(c=>{
-    const groupeLabel = GROUPES_COMPTA.find(g=>g.id===c.groupe)?.label || c.groupe || "";
-    lignes.push(`${c.label};${groupeLabel};${nb(c.montant)};${pct(c.pctCA)}`);
+  lignes.push("CHARGES DÉTAILLÉES PAR CATÉGORIE COMPTABLE (labo + tous points de vente)");
+  lignes.push("Groupe / Sous-catégorie;Montant (€);% du CA");
+  ex.groupesCharges.forEach(g=>{
+    lignes.push(`${g.groupeLabel};${nb(g.totalGroupe)};${pct(g.pctCA)}`);
+    g.items.forEach(c=>lignes.push(`  ${c.label};${nb(c.montant)};${pct(c.pctCA)}`));
   });
-  lignes.push(`TOTAL CHARGES;;${nb(ex.totalCharges)};${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}`);
+  lignes.push(`TOTAL CHARGES;${nb(ex.totalCharges)};${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}`);
   lignes.push("");
 
   lignes.push("ENCAISSEMENTS PAR POINT DE VENTE");
@@ -809,7 +829,12 @@ function genererCsvExport(ex){
     lignes.push("DÉPENSES MANUELLES (espèces / BL)");
     lignes.push("Date;Catégorie;Affecté à;Montant (€);Mode;Saisi par;% du CA");
     ex.depensesManuelles.forEach(d=>lignes.push(`${d.date};${d.categorie};${d.scope};${nb(d.montant)};${d.mode};${d.vendeur};${pct(d.pctCA)}`));
+    lignes.push("");
   }
+
+  lignes.push("DÉTAIL PAR POINT DE VENTE (classé du plus au moins rentable)");
+  lignes.push("Point de vente;CA (€);Résultat net (€);% net");
+  ex.classementPdv.forEach(p=>lignes.push(`${p.pdv};${nb(p.ca)};${nb(p.resultatNet)};${pct(p.pctNet)}`));
 
   return lignes.join("\n");
 }
@@ -824,14 +849,15 @@ function genererPdfExport(ex){
   const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
   const pct = v => v.toLocaleString("fr-FR",{minimumFractionDigits:1,maximumFractionDigits:1})+"%";
 
-  const ligneCharge = c => {
-    const groupeLabel = GROUPES_COMPTA.find(g=>g.id===c.groupe)?.label || "";
-    return `<tr><td>${c.label}</td><td class="muted">${groupeLabel}</td><td class="num">${nb(c.montant)}</td><td class="num">${pct(c.pctCA)}</td></tr>`;
-  };
+  const blocGroupeCharge = g => `
+    <tr class="groupe-row"><td colspan="2">${g.groupeLabel}</td><td class="num">${nb(g.totalGroupe)}</td><td class="num">${pct(g.pctCA)}</td></tr>
+    ${g.items.map(c=>`<tr><td class="indent">${c.label}</td><td></td><td class="num muted">${nb(c.montant)}</td><td class="num muted">${pct(c.pctCA)}</td></tr>`).join("")}
+  `;
   const lignePdv = e => {
     const detail = Object.entries(e.parMode).map(([m,v])=>`${m}: ${nb(v)}`).join(" · ");
     return `<tr><td>${e.pdv}</td><td class="num">${nb(e.total)}</td><td class="num">${pct(e.pctCA)}</td><td class="muted small">${detail}</td></tr>`;
   };
+  const ligneClassementPdv = (p,i) => `<tr><td>#${i+1}</td><td>${p.pdv}</td><td class="num">${nb(p.ca)}</td><td class="num" style="color:${p.resultatNet>=0?'#2d6a4f':'#c1121f'}">${nb(p.resultatNet)}</td><td class="num">${pct(p.pctNet)}</td></tr>`;
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Rapport ${ex.moisLabel}</title>
 <style>
@@ -840,19 +866,22 @@ function genererPdfExport(ex){
   h2{font-size:14px;margin:24px 0 8px;padding-bottom:6px;border-bottom:2px solid #2d6a4f;color:#2d6a4f;}
   table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px;}
   th{text-align:left;background:#f8f9fa;padding:6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:#6c757d;border-bottom:1px solid #e9ecef;}
-  td{padding:6px 8px;border-bottom:1px solid #f0f0f0;}
+  td{padding:5px 8px;border-bottom:1px solid #f0f0f0;}
+  td.indent{padding-left:20px;}
   .num{text-align:right;font-weight:600;}
-  .muted{color:#6c757d;}
+  .muted{color:#6c757d;font-weight:400;}
   .small{font-size:10px;}
   .synthese{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;}
   .kpi{flex:1;min-width:140px;background:#f8f9fa;border-radius:8px;padding:12px;}
   .kpi .label{font-size:10px;text-transform:uppercase;color:#6c757d;margin-bottom:4px;}
   .kpi .val{font-size:18px;font-weight:700;color:#2d6a4f;}
   .total-row{font-weight:700;background:#f8f9fa;}
+  .groupe-row{font-weight:700;background:#f1f6f3;}
+  .page-break{page-break-before:always;}
   @media print{ body{padding:0;} }
 </style></head><body>
   <h1>🫒 Rapport mensuel — ${ex.moisLabel}</h1>
-  <div class="muted small">Généré le ${new Date().toLocaleDateString("fr-FR")}</div>
+  <div class="muted small">Généré le ${new Date().toLocaleDateString("fr-FR")} · Page 1/2</div>
 
   <h2>Synthèse</h2>
   <div class="synthese">
@@ -863,10 +892,10 @@ function genererPdfExport(ex){
     <div class="kpi"><div class="label">Résultat net</div><div class="val" style="color:${ex.tNet>=0?'#2d6a4f':'#c1121f'}">${nb(ex.tNet)} (${pct(ex.pctNet)})</div></div>
   </div>
 
-  <h2>Charges détaillées (labo + tous points de vente)</h2>
+  <h2>Charges par catégorie comptable (labo + tous points de vente)</h2>
   <table>
-    <tr><th>Sous-catégorie</th><th>Groupe comptable</th><th>Montant</th><th>% du CA</th></tr>
-    ${ex.charges.map(ligneCharge).join("")}
+    <tr><th>Catégorie / Sous-catégorie</th><th></th><th>Montant</th><th>% du CA</th></tr>
+    ${ex.groupesCharges.map(blocGroupeCharge).join("")}
     <tr class="total-row"><td colspan="2">TOTAL CHARGES</td><td class="num">${nb(ex.totalCharges)}</td><td class="num">${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}</td></tr>
   </table>
 
@@ -889,6 +918,16 @@ function genererPdfExport(ex){
     <tr><th>Date</th><th>Catégorie</th><th>Affecté à</th><th>Montant</th><th>Mode</th><th>Saisi par</th></tr>
     ${ex.depensesManuelles.map(d=>`<tr><td>${d.date}</td><td>${d.categorie}</td><td class="muted">${d.scope}</td><td class="num">${nb(d.montant)}</td><td>${d.mode}</td><td class="muted small">${d.vendeur}</td></tr>`).join("")}
   </table>` : ""}
+
+  <div class="page-break"></div>
+  <h1>🫒 Détail par point de vente — ${ex.moisLabel}</h1>
+  <div class="muted small">Classé du plus au moins rentable · Page 2/2</div>
+
+  <h2>Classement des points de vente</h2>
+  <table>
+    <tr><th>#</th><th>Point de vente</th><th>CA</th><th>Résultat net</th><th>% net</th></tr>
+    ${ex.classementPdv.map(ligneClassementPdv).join("")}
+  </table>
 
 </body></html>`;
 
