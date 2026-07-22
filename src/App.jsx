@@ -1208,16 +1208,43 @@ function GestionPaiements({paiements, onChange}){
 // utile pour les postes où aucune référence sectorielle fiable n'existe pour
 // un modèle de vente directe multi-sites (droits de place, logistique...).
 function GestionObjectifs({objectifs, onChange}){
-  const refs = objectifs || REFERENCES_SECTORIELLES_DEFAUT;
+  const refsDistantes = objectifs || REFERENCES_SECTORIELLES_DEFAUT;
   const keys = Object.keys(REFERENCES_SECTORIELLES_DEFAUT);
 
-  const updRef = (key, field, value) => {
-    const val = value===""?0:n(value);
-    onChange({...refs, [key]: {...refs[key], [field]: val}});
+  // CORRECTIF SAUT DE CURSEUR : la saisie se fait dans un état LOCAL
+  // (localRefs), qui réagit instantanément sans aller-retour réseau. La
+  // sauvegarde vers Supabase (via onChange, qui recharge et écrit en base)
+  // ne se déclenche qu'au blur du champ — pas à chaque frappe — ce qui
+  // évite que React ne perde la position du curseur pendant la saisie.
+  const [localRefs, setLocalRefs] = useState(()=>JSON.parse(JSON.stringify(refsDistantes)));
+
+  // Si les objectifs distants changent pour une autre raison (ex: un autre
+  // appareil a modifié entre-temps), on resynchronise l'état local — mais
+  // seulement quand on n'est pas en train de taper, pour ne pas écraser une
+  // saisie en cours.
+  const [editing, setEditing] = useState(false);
+  useEffect(()=>{
+    if(!editing) setLocalRefs(JSON.parse(JSON.stringify(refsDistantes)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objectifs]);
+
+  const updLocal = (key, field, value) => {
+    setEditing(true);
+    setLocalRefs(prev=>({...prev, [key]: {...prev[key], [field]: value}}));
+  };
+  const commit = (key, field) => {
+    setEditing(false);
+    const raw = localRefs[key]?.[field];
+    const val = raw===""||raw===undefined||raw===null ? 0 : n(raw);
+    const cleaned = {...localRefs, [key]: {...localRefs[key], [field]: val}};
+    setLocalRefs(cleaned);
+    onChange(cleaned);
   };
   const reinitialiser = () => {
     if(window.confirm("Réinitialiser tous les objectifs aux valeurs par défaut ?")) {
-      onChange(JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)));
+      const fresh = JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT));
+      setLocalRefs(fresh);
+      onChange(fresh);
     }
   };
 
@@ -1232,7 +1259,7 @@ function GestionObjectifs({objectifs, onChange}){
 
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
       {keys.map(key=>{
-        const ref = refs[key] || REFERENCES_SECTORIELLES_DEFAUT[key];
+        const ref = localRefs[key] || REFERENCES_SECTORIELLES_DEFAUT[key];
         const isMargeNette = key==="margeNette";
         return <Card key={key} pad={16}>
           <div style={{fontWeight:600,fontSize:14,marginBottom:4}}>{ref.label}</div>
@@ -1241,7 +1268,10 @@ function GestionObjectifs({objectifs, onChange}){
             <div style={{flex:1,minWidth:100}}>
               <Label>{isMargeNette?"Minimum acceptable (%)":"Minimum (%)"}</Label>
               <div style={{position:"relative"}}>
-                <input type="number" min="0" step="0.5" value={ref.min} onChange={e=>updRef(key,"min",e.target.value)}
+                <input type="number" min="0" step="0.5" value={ref.min}
+                  onChange={e=>updLocal(key,"min",e.target.value)}
+                  onBlur={()=>commit(key,"min")}
+                  onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                   style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
                 <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
               </div>
@@ -1249,7 +1279,10 @@ function GestionObjectifs({objectifs, onChange}){
             <div style={{flex:1,minWidth:100}}>
               <Label>{isMargeNette?"Objectif ambitieux (%)":"Maximum (%)"}</Label>
               <div style={{position:"relative"}}>
-                <input type="number" min="0" step="0.5" value={ref.max} onChange={e=>updRef(key,"max",e.target.value)}
+                <input type="number" min="0" step="0.5" value={ref.max}
+                  onChange={e=>updLocal(key,"max",e.target.value)}
+                  onBlur={()=>commit(key,"max")}
+                  onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                   style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
                 <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
               </div>
@@ -1257,6 +1290,9 @@ function GestionObjectifs({objectifs, onChange}){
           </div>
         </Card>;
       })}
+    </div>
+    <div style={{fontSize:11,color:C.textLight,marginTop:12,textAlign:"center"}}>
+      💾 Les modifications sont enregistrées automatiquement quand vous quittez un champ (ou appuyez sur Entrée).
     </div>
   </div>;
 }
