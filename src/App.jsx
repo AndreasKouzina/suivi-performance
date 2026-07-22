@@ -36,6 +36,33 @@ const GROUPES_COMPTA = [
   { id:"g68",  label:"9. Dotations aux amortissements (68)" },
   { id:"g0",   label:"À classer" },
 ];
+
+// ─── RÉFÉRENCES DE PILOTAGE (% du CA) — valeurs par défaut ───────────────────
+// Fourchettes de pilotage adaptées à un modèle de restauration rapide "faite
+// maison" avec vente directe (marchés + boutiques) — production propre en
+// laboratoire central, pas de l'achat-revente ni du traiteur événementiel sur
+// devis. Issues de sources professionnelles françaises de la restauration
+// (blogs spécialisés, cabinets comptables sectoriels — pas de statistiques
+// officielles INSEE disponibles sur ce point depuis 2015).
+//
+// Ce ne sont que des VALEURS PAR DÉFAUT : chaque patron peut les ajuster à sa
+// propre réalité dans l'onglet "🎯 Mes objectifs" (stockées dans app_data,
+// clé `objectifsSectoriels`, elles remplacent alors ces valeurs par défaut).
+//
+// { min, max } = fourchette saine en % du CA. Au-delà de `max`, le poste est
+// à surveiller ; en-deçà de `min` ce n'est pas un problème en soi (sauf pour
+// la marge nette où c'est l'inverse).
+const REFERENCES_SECTORIELLES_DEFAUT = {
+  g601: { label:"Matières premières", min:25, max:35, note:"Restauration avec production propre : 25–35% du CA" },
+  g606: { label:"Fonctionnement (eau, élec, fournitures)", min:3, max:8, note:"Repère indicatif — à ajuster selon votre expérience" },
+  g61:  { label:"Services extérieurs (loyers, droits de place, assurances...)", min:5, max:12, note:"Vos droits de place de marché diffèrent d'un loyer classique — ajustez selon votre réalité" },
+  g62:  { label:"Autres services (pub, déplacements, frais bancaires...)", min:3, max:10, note:"Inclut la logistique multi-sites, spécifique à votre modèle — ajustez selon votre réalité" },
+  g63:  { label:"Impôts et taxes", min:2, max:4, note:"CFE, taxes locales, formation pro" },
+  g64:  { label:"Charges de personnel", min:30, max:40, note:"Production maison (labo + vente) : masse salariale plus élevée que l'achat-revente" },
+  primeCost: { label:"Prime cost (matières + personnel)", min:0, max:65, note:"Ne devrait pas dépasser 60–65% du CA — indicateur de survie" },
+  margeNette: { label:"Marge nette (résultat net)", min:8, max:15, note:"5–10% = bon, 12–15% = très bon, en restauration avec production propre" },
+};
+
 const DEFAULT_COMPTA_CATS = [
   // 1. Achats matières premières — 601/602
   { id:"matieres",        groupe:"g601", label:"Denrées alimentaires",                          type:"variable", montantFixe:0 },
@@ -136,6 +163,7 @@ function initLocal(){
     pdvCats:  Object.fromEntries(PDV_LIST.map(p=>[p.id, DEFAULT_PDV_CATS.map(c=>({...c}))])),
     paiements: DEFAULT_PAIEMENTS.map(p=>({...p})),
     vendeurs: [],
+    objectifsSectoriels: JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
     active: key,
     mois: { [key]: initMois() }
   };
@@ -208,6 +236,12 @@ async function loadFromSupabase(){
       pdvCats: Object.keys(appRow.pdv_cats||{}).length ? appRow.pdv_cats : Object.fromEntries(PDV_LIST.map(p=>[p.id, DEFAULT_PDV_CATS.map(c=>({...c}))])),
       paiements: appRow.paiements?.length ? appRow.paiements : DEFAULT_PAIEMENTS.map(p=>({...p})),
       vendeurs: appRow.vendeurs || [],
+      // Objectifs personnalisés de comparaison sectorielle (onglet "Mes objectifs").
+      // Repli sur les valeurs par défaut si absent (première utilisation, ou
+      // colonne objectifs_sectoriels pas encore créée côté Supabase).
+      objectifsSectoriels: (appRow.objectifs_sectoriels && Object.keys(appRow.objectifs_sectoriels).length)
+        ? appRow.objectifs_sectoriels
+        : JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
       active: key,
       mois: Object.keys(mois).length ? mois : { [key]: initMois() }
     };
@@ -225,6 +259,7 @@ async function saveAppDataToSupabase(data){
       pdv_cats: data.pdvCats,
       paiements: data.paiements,
       vendeurs: data.vendeurs,
+      objectifs_sectoriels: data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT,
       active_mois: data.active,
       updated_at: new Date().toISOString()
     });
@@ -615,6 +650,58 @@ function topCharges(data, moisActif, moisKeyActif, topN=8, histCount=3){
 
   rows.sort((r1,r2)=>r2.montant-r1.montant);
   return rows.slice(0, topN);
+}
+
+// ─── COMPARAISON SECTORIELLE ──────────────────────────────────────────────────
+// Pour chaque groupe comptable, calcule le montant réel du mois (labo + tous
+// les PDV confondus), son % du CA, et le compare à la fourchette de référence
+// sectorielle (REFERENCES_SECTORIELLES_DEFAUT, ou objectifs personnalisés si définis). Ajoute aussi le prime cost (matières
+// + personnel) et la marge nette, deux indicateurs de synthèse.
+// Statut retourné pour chaque ligne : "bon" (dans la fourchette ou en-dessous
+// du max, sauf marge nette où c'est l'inverse), "attention" (léger dépassement,
+// jusqu'à +20% du max), "alerte" (dépassement important).
+function comparaisonSectorielle(data, moisObj, tCA){
+  if(tCA<=0) return [];
+  const refs = data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT;
+
+  // Montant réel par groupe comptable = labo + tous les PDV
+  const parGroupe = {};
+  GROUPES_COMPTA.forEach(g=>{ parGroupe[g.id]=0; });
+  (data.laboCats||[]).forEach(cat=>{ parGroupe[cat.groupe] = (parGroupe[cat.groupe]||0) + montantCat(cat, moisObj.laboCh); });
+  PDV_LIST.forEach(p=>{
+    (data.pdvCats[p.id]||[]).forEach(cat=>{ parGroupe[cat.groupe] = (parGroupe[cat.groupe]||0) + montantCat(cat, moisObj.pdv[p.id]?.vars); });
+  });
+
+  const evalStatut = (pct, ref, inverse=false) => {
+    if(inverse){
+      // Pour la marge nette : en-dessous du min = problème, au-dessus = bon
+      if(pct>=ref.min) return "bon";
+      if(pct>=ref.min*0.7) return "attention";
+      return "alerte";
+    }
+    if(pct<=ref.max) return "bon";
+    if(pct<=ref.max*1.2) return "attention";
+    return "alerte";
+  };
+
+  const rows = Object.keys(refs)
+    .filter(k=>k!=="primeCost" && k!=="margeNette")
+    .map(groupeId=>{
+      const ref = refs[groupeId];
+      const montant = parGroupe[groupeId]||0;
+      const pct = (montant/tCA)*100;
+      return { key:groupeId, label:ref.label, montant, pct, ref, statut: evalStatut(pct, ref) };
+    });
+
+  // Prime cost = matières premières (g601) + personnel (g64)
+  const primeCostMontant = (parGroupe.g601||0) + (parGroupe.g64||0);
+  const primeCostPct = (primeCostMontant/tCA)*100;
+  rows.push({
+    key:"primeCost", label:refs.primeCost.label, montant:primeCostMontant, pct:primeCostPct,
+    ref:refs.primeCost, statut: evalStatut(primeCostPct, refs.primeCost), isSynthese:true
+  });
+
+  return rows;
 }
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -1110,6 +1197,66 @@ function GestionPaiements({paiements, onChange}){
           </div>
         </Card>
       ))}
+    </div>
+  </div>;
+}
+
+// ─── MES OBJECTIFS (fourchettes personnalisables de comparaison sectorielle) ──
+// Permet au patron d'ajuster chaque fourchette min/max utilisée dans le bloc
+// "Comparaison avec le secteur" du Dashboard, pour remplacer les repères
+// génériques par sa propre connaissance fine de son métier — particulièrement
+// utile pour les postes où aucune référence sectorielle fiable n'existe pour
+// un modèle de vente directe multi-sites (droits de place, logistique...).
+function GestionObjectifs({objectifs, onChange}){
+  const refs = objectifs || REFERENCES_SECTORIELLES_DEFAUT;
+  const keys = Object.keys(REFERENCES_SECTORIELLES_DEFAUT);
+
+  const updRef = (key, field, value) => {
+    const val = value===""?0:n(value);
+    onChange({...refs, [key]: {...refs[key], [field]: val}});
+  };
+  const reinitialiser = () => {
+    if(window.confirm("Réinitialiser tous les objectifs aux valeurs par défaut ?")) {
+      onChange(JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)));
+    }
+  };
+
+  return <div>
+    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
+      <div style={{fontSize:12,color:C.textMuted}}>
+        Ces fourchettes servent de repère dans le bloc "📐 Comparaison avec le secteur" du Dashboard. Ajustez-les selon votre propre connaissance de votre activité — les valeurs par défaut sont des repères génériques de restauration avec production propre, qui ne collent pas forcément à votre modèle multi-sites (marchés + boutiques).
+      </div>
+    </Card>
+
+    <SectionHead action={<button onClick={reinitialiser} style={{...base,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer",color:C.textMuted}}>↺ Réinitialiser</button>}>Vos objectifs par poste</SectionHead>
+
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {keys.map(key=>{
+        const ref = refs[key] || REFERENCES_SECTORIELLES_DEFAUT[key];
+        const isMargeNette = key==="margeNette";
+        return <Card key={key} pad={16}>
+          <div style={{fontWeight:600,fontSize:14,marginBottom:4}}>{ref.label}</div>
+          <div style={{fontSize:11,color:C.textLight,marginBottom:12}}>{ref.note}</div>
+          <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+            <div style={{flex:1,minWidth:100}}>
+              <Label>{isMargeNette?"Minimum acceptable (%)":"Minimum (%)"}</Label>
+              <div style={{position:"relative"}}>
+                <input type="number" min="0" step="0.5" value={ref.min} onChange={e=>updRef(key,"min",e.target.value)}
+                  style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+                <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
+              </div>
+            </div>
+            <div style={{flex:1,minWidth:100}}>
+              <Label>{isMargeNette?"Objectif ambitieux (%)":"Maximum (%)"}</Label>
+              <div style={{position:"relative"}}>
+                <input type="number" min="0" step="0.5" value={ref.max} onChange={e=>updRef(key,"max",e.target.value)}
+                  style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+                <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
+              </div>
+            </div>
+          </div>
+        </Card>;
+      })}
     </div>
   </div>;
 }
@@ -2229,6 +2376,61 @@ function TopChargesPanel({rows, tCA}){
   </Card>;
 }
 
+// ─── COMPARAISON SECTORIELLE (repères du métier) ──────────────────────────────
+// Situe chaque grand poste de charge (en % du CA) par rapport aux fourchettes
+// habituellement observées dans la restauration/traiteur événementiel en
+// France. Objectif : repérer d'un coup d'œil les postes qui méritent d'être
+// creusés en priorité pour gagner en rentabilité.
+function ComparaisonSectoriellePanel({rows, margeNettePct, objectifs}){
+  if(rows.length===0) return null;
+  const statutColor = { bon:C.green, attention:C.warn, alerte:C.red };
+  const statutBg = { bon:C.greenLight, attention:C.warnLight, alerte:C.redLight };
+  const statutIcon = { bon:"✅", attention:"⚠️", alerte:"🔴" };
+
+  const margeRef = (objectifs||REFERENCES_SECTORIELLES_DEFAUT).margeNette;
+  const margeStatut = margeNettePct>=margeRef.min ? "bon" : (margeNettePct>=margeRef.min*0.7 ? "attention" : "alerte");
+
+  return <Card style={{marginBottom:20}}>
+    <SectionHead>📐 Comparaison avec le secteur</SectionHead>
+    <div style={{fontSize:11,color:C.textMuted,marginBottom:14}}>
+      Vos postes de charge comparés aux fourchettes habituelles d'un traiteur événementiel en France. Ce sont des repères de pilotage, pas des normes absolues — à recouper avec votre expert-comptable.
+    </div>
+
+    {/* Marge nette en avant, c'est l'indicateur de synthèse le plus parlant */}
+    <div style={{background:statutBg[margeStatut],border:`1px solid ${statutColor[margeStatut]}33`,borderRadius:10,padding:14,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:700,color:statutColor[margeStatut]}}>{statutIcon[margeStatut]} Marge nette</div>
+          <div style={{fontSize:10,color:C.textMuted,marginTop:2}}>Repère secteur : {margeRef.min}–{margeRef.max}%</div>
+        </div>
+        <div style={{fontSize:22,fontWeight:800,color:statutColor[margeStatut]}}>{margeNettePct.toFixed(1)}%</div>
+      </div>
+    </div>
+
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {rows.map(r=>{
+        const barPct = Math.min(100, (r.pct/r.ref.max)*100);
+        return <div key={r.key} style={r.isSynthese?{paddingTop:10,borderTop:`1px solid ${C.border}`}:{}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <span style={{fontSize:12,flexShrink:0}}>{statutIcon[r.statut]}</span>
+              <span style={{fontSize:13,fontWeight:r.isSynthese?700:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+              <span style={{fontSize:11,color:C.textLight}}>repère {r.ref.min}–{r.ref.max}%</span>
+              <span style={{fontSize:13,fontWeight:700,color:statutColor[r.statut],minWidth:50,textAlign:"right"}}>{r.pct.toFixed(1)}%</span>
+            </div>
+          </div>
+          <div style={{background:C.bg,borderRadius:3,height:6,overflow:"hidden"}}>
+            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:statutColor[r.statut],transition:"width 0.5s"}}/>
+          </div>
+          <div style={{fontSize:10,color:C.textLight,marginTop:2}}>{r.montant.toLocaleString("fr-FR",{maximumFractionDigits:0})} € · {r.ref.note}</div>
+        </div>;
+      })}
+    </div>
+  </Card>;
+}
+
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({data,moisData,onUpdateMois}){
   const [montantEvent,setMontantEvent]=useState("");
@@ -2253,7 +2455,8 @@ function Dashboard({data,moisData,onUpdateMois}){
   const totalChargesPDV = totalChargesDirectesPDV(moisData.pdv, data.pdvCats);
   const autresChargesLabo = tL - totalMat;
   const topChargesRows = topCharges(data, moisData, data.active, 8, 3);
-
+  const comparaisonRows = comparaisonSectorielle(data, moisData, tCA);
+  const margeNettePct = tCA>0 ? (tNet/tCA)*100 : 0;
 
   // CORRECTIF ANTI-ÉCRASEMENT : onUpdateMois (= upd, voir AppPatron) recharge
   // déjà Supabase juste avant d'écrire et applique ce mutateur sur le mois
@@ -2291,6 +2494,7 @@ function Dashboard({data,moisData,onUpdateMois}){
 
     <CascadeResultat tCA={tCA} totalMat={totalMat} tMB={tMB} autresChargesLabo={autresChargesLabo} totalChargesPDV={totalChargesPDV} tNet={tNet}/>
     <TopChargesPanel rows={topChargesRows} tCA={tCA}/>
+    <ComparaisonSectoriellePanel rows={comparaisonRows} margeNettePct={margeNettePct} objectifs={data.objectifsSectoriels}/>
 
     <Card style={{background:C.fixeLight,marginBottom:20}} pad={16}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
@@ -2600,6 +2804,7 @@ function AppPatron({data,setData,patron,onLogout}){
     ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
+    {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
     {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
     {id:"rapprochement",label:"Rapprochement",icon:"🔍"},
     {id:"compte",label:"Mon compte",icon:"🔑"},
@@ -2632,7 +2837,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","caisse","rapprochement","compte"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","objectifs","caisse","rapprochement","compte"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -2646,7 +2851,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -2658,6 +2863,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData(fresh=>({...fresh,vendeurs:v}))}/>}
         {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
+        {page==="objectifs"&&<GestionObjectifs objectifs={data.objectifsSectoriels} onChange={o=>updData(fresh=>({...fresh,objectifsSectoriels:o}))}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="rapprochement"&&<PanneauRapprochement moisData={md}/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
