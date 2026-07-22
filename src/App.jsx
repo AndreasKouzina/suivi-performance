@@ -225,9 +225,10 @@ function migrateLaboCats(data){
 async function loadFromSupabase(){
   try{
     const { data: appRow, error: e1 } = await supabase.from("app_data").select("*").eq("id","main").maybeSingle();
-    if(e1 || !appRow) return null;
+    if(e1) { console.error("Supabase load error (app_data):", e1); return { data:null, error:e1.message||"Erreur de connexion" }; }
+    if(!appRow) return { data:null, error:null }; // pas d'erreur réseau, juste pas encore de données (première utilisation)
     const { data: moisRows, error: e2 } = await supabase.from("mois_data").select("*");
-    if(e2) return null;
+    if(e2) { console.error("Supabase load error (mois_data):", e2); return { data:null, error:e2.message||"Erreur de connexion" }; }
     const mois = {};
     (moisRows||[]).forEach(r=>{ mois[r.mois_key] = fillPdvKeys({ laboCh: r.labo_ch||{}, pdv: r.pdv||{} }); });
     const key = appRow.active_mois || moisKey();
@@ -246,14 +247,14 @@ async function loadFromSupabase(){
       mois: Object.keys(mois).length ? mois : { [key]: initMois() }
     };
     result = ensureMois(result, key);
-    return result;
-  }catch(err){ console.error("Supabase load error:", err); return null; }
+    return { data:result, error:null };
+  }catch(err){ console.error("Supabase load error:", err); return { data:null, error: err?.message || "Erreur réseau inattendue" }; }
 }
 
 // Sauvegarde app_data (config globale) — debounced côté appelant
 async function saveAppDataToSupabase(data){
   try{
-    await supabase.from("app_data").upsert({
+    const { error } = await supabase.from("app_data").upsert({
       id: "main",
       labo_cats: data.laboCats,
       pdv_cats: data.pdvCats,
@@ -263,19 +264,23 @@ async function saveAppDataToSupabase(data){
       active_mois: data.active,
       updated_at: new Date().toISOString()
     });
-  }catch(err){ console.error("Supabase save app_data error:", err); }
+    if(error){ console.error("Supabase save app_data error:", error); return { success:false, error: error.message||"Erreur de sauvegarde" }; }
+    return { success:true, error:null };
+  }catch(err){ console.error("Supabase save app_data error:", err); return { success:false, error: err?.message || "Erreur réseau inattendue" }; }
 }
 
 // Sauvegarde un mois précis
 async function saveMoisToSupabase(key, moisObj){
   try{
-    await supabase.from("mois_data").upsert({
+    const { error } = await supabase.from("mois_data").upsert({
       mois_key: key,
       labo_ch: moisObj.laboCh,
       pdv: moisObj.pdv,
       updated_at: new Date().toISOString()
     });
-  }catch(err){ console.error("Supabase save mois_data error:", err); }
+    if(error){ console.error("Supabase save mois_data error:", error); return { success:false, error: error.message||"Erreur de sauvegarde" }; }
+    return { success:true, error:null };
+  }catch(err){ console.error("Supabase save mois_data error:", err); return { success:false, error: err?.message || "Erreur réseau inattendue" }; }
 }
 
 // ─── ÉCRITURE SÉCURISÉE (anti-écrasement) ─────────────────────────────────────
@@ -292,8 +297,11 @@ async function saveMoisToSupabase(key, moisObj){
 // utile pour informer l'utilisateur plutôt que de silencieusement écraser.
 let lastKnownRemoteSnapshot = null; // pour détection de conflit (best-effort)
 
-async function safeWriteMois(currentData, key, mutatorFn, conflictNotifier){
-  const remote = await loadFromSupabase();
+async function safeWriteMois(currentData, key, mutatorFn, conflictNotifier, errorNotifier){
+  const { data: remote, error: loadErr } = await loadFromSupabase();
+  if(loadErr && errorNotifier){
+    errorNotifier(`Impossible de vérifier les dernières données avant d'écrire (${loadErr}). Réessayez dans quelques instants — rien n'a été perdu localement.`);
+  }
   const freshData = remote ? migrateLaboCats(remote) : currentData;
   const freshMois = fillPdvKeys(freshData.mois[key] || initMois());
 
@@ -309,15 +317,21 @@ async function safeWriteMois(currentData, key, mutatorFn, conflictNotifier){
   }
 
   const newMois = mutatorFn(freshMois);
-  await saveMoisToSupabase(key, newMois);
+  const { success, error: saveErr } = await saveMoisToSupabase(key, newMois);
   const newData = {...freshData, mois:{...freshData.mois, [key]:newMois}};
-  saveCache(newData);
+  saveCache(newData); // toujours sauvegardé en local, même si l'écriture distante échoue
+  if(!success && errorNotifier){
+    errorNotifier(`⚠️ La sauvegarde en ligne a échoué (${saveErr}). Votre saisie est conservée localement sur cet appareil — reconnectez-vous puis ressaisissez cette action pour la synchroniser, ou contactez le support si le problème persiste.`);
+  }
   return newData;
 }
 
 // Variante pour les données globales (app_data) : catégories, vendeurs, paiements...
-async function safeWriteAppData(currentData, mutatorFn, conflictNotifier){
-  const remote = await loadFromSupabase();
+async function safeWriteAppData(currentData, mutatorFn, conflictNotifier, errorNotifier){
+  const { data: remote, error: loadErr } = await loadFromSupabase();
+  if(loadErr && errorNotifier){
+    errorNotifier(`Impossible de vérifier les dernières données avant d'écrire (${loadErr}). Réessayez dans quelques instants — rien n'a été perdu localement.`);
+  }
   const freshData = remote ? migrateLaboCats(remote) : currentData;
 
   if(conflictNotifier){
@@ -329,8 +343,11 @@ async function safeWriteAppData(currentData, mutatorFn, conflictNotifier){
   }
 
   const newData = mutatorFn(freshData);
-  await saveAppDataToSupabase(newData);
+  const { success, error: saveErr } = await saveAppDataToSupabase(newData);
   saveCache(newData);
+  if(!success && errorNotifier){
+    errorNotifier(`⚠️ La sauvegarde en ligne a échoué (${saveErr}). Votre modification est conservée localement sur cet appareil — reconnectez-vous puis ressaisissez cette action pour la synchroniser, ou contactez le support si le problème persiste.`);
+  }
   return newData;
 }
 
@@ -1110,6 +1127,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const [depForm,setDepForm]=useState({montant:"",modeId:"",scope:"pdv",catId:""});
 
   const [saving,setSaving]=useState(false);
+  const [saveError,setSaveError]=useState(null);
 
   const pdvInfo=PDV_LIST.find(p=>p.id===pdvId);
   const total=modes.reduce((s,m)=>s+n(m.montant),0);
@@ -1145,6 +1163,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
   const valider=async ()=>{
     setSaving(true);
+    setSaveError(null);
     // Si le vendeur a saisi un montant mais n'a pas cliqué "+ Ajouter", on l'ajoute automatiquement
     let depensesFinales = [...depenses];
     if(n(depForm.montant)>0){
@@ -1159,7 +1178,13 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
     const key=moisKey();
     // Recharger les données fraîches depuis Supabase avant d'écrire
     // pour éviter d'écraser des données plus récentes
-    const remote = await loadFromSupabase();
+    const { data: remote, error: loadErr } = await loadFromSupabase();
+    if(loadErr){
+      // On continue quand même avec les données locales disponibles plutôt
+      // que de bloquer complètement le vendeur sur le terrain — mais on
+      // l'avertit clairement que la synchronisation a un souci.
+      setSaveError(`Connexion instable (${loadErr}). La clôture va quand même être enregistrée localement.`);
+    }
     const baseData = remote || data;
     const d = ensureMois(baseData, key);
     const cloture={
@@ -1203,10 +1228,18 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
     mois = {...mois, pdv:pdvObj, laboCh};
     const newData={...d, mois:{...d.mois,[key]:mois}};
-    onSave(newData);
+    const result = await onSave(newData);
     setSaving(false);
+    if(result && result.success===false){
+      // La sauvegarde en ligne a échoué : on prévient clairement plutôt que
+      // de laisser croire que tout s'est bien passé. La donnée reste dans le
+      // cache local de cet appareil (saveCache déjà fait dans handleVendeurSave).
+      setSaveError(`⚠️ La clôture n'a pas pu être synchronisée en ligne (${result.error}). Elle reste enregistrée sur cet appareil — ne fermez pas cette page et réessayez dès que la connexion revient (bouton ci-dessous), ou signalez-le au patron.`);
+      return;
+    }
     setStep("confirm");
   };
+  const reessayerValidation = ()=>{ valider(); };
 
   if(step==="confirm") return (
     <div style={{minHeight:"100vh",background:C.primaryLight,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
@@ -1347,6 +1380,14 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
             <div style={{fontSize:28,fontWeight:800,color:total>0?"#fff":C.textLight}}>{total.toLocaleString("fr-FR")} €</div>
           </div>
         </Card>
+
+        {saveError && <Card style={{background:C.redLight,border:`1px solid ${C.red}33`,marginBottom:16}} pad={14}>
+          <div style={{fontSize:13,color:C.red,fontWeight:600,marginBottom:8}}>{saveError}</div>
+          <button onClick={reessayerValidation} disabled={saving}
+            style={{...base,background:C.red,color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:saving?"not-allowed":"pointer"}}>
+            🔄 Réessayer
+          </button>
+        </Card>}
 
         <button onClick={valider} disabled={total===0||saving}
           style={{...base,width:"100%",background:total>0&&!saving?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0&&!saving?"pointer":"not-allowed",transition:"background 0.15s"}}>
@@ -1738,7 +1779,8 @@ function ImportCSV({data, md, onApplied}){
     // CORRECTIF ANTI-ÉCRASEMENT : on repart des données fraîches de Supabase
     // plutôt que de `md`/`data` (potentiellement périmés si quelqu'un d'autre
     // a écrit pendant que le patron classait les lignes du CSV).
-    const remoteForImport = await loadFromSupabase();
+    const { data: remoteForImport, error: loadErrImport } = await loadFromSupabase();
+    if(loadErrImport) console.error("Rechargement avant import CSV échoué, utilisation des données locales:", loadErrImport);
     const freshDataForImport = remoteForImport ? migrateLaboCats(remoteForImport) : data;
     const startKey = freshDataForImport.active;
     const freshMdForImport = fillPdvKeys(freshDataForImport.mois[startKey] || initMois());
@@ -3109,6 +3151,14 @@ function AppPatron({data,setData,patron,onLogout}){
     setConflictMsg("Les données ont été modifiées ailleurs entre-temps (autre appareil, import, ou saisie vendeur). Votre action a été appliquée sur la version la plus récente — rien n'a été perdu.");
     setTimeout(()=>setConflictMsg(null), 8000);
   };
+  const [errorMsg,setErrorMsg]=useState(null);
+  const notifyError=(msg)=>{
+    setErrorMsg(msg);
+    // Pas de disparition automatique pour une vraie erreur : contrairement au
+    // conflit (résolu automatiquement, informatif), une erreur réseau reste
+    // affichée jusqu'à ce que l'utilisateur la ferme, car elle peut nécessiter
+    // une action de sa part (réessayer, vérifier sa connexion).
+  };
 
   // CORRECTIF ANTI-ÉCRASEMENT : point d'entrée UNIQUE pour toute modification
   // du mois actif. mutatorFn reçoit toujours le mois FRAIS (rechargé depuis
@@ -3118,7 +3168,7 @@ function AppPatron({data,setData,patron,onLogout}){
     const mutatorFn = typeof mutatorFnOrObject==="function"
       ? mutatorFnOrObject
       : ()=>mutatorFnOrObject; // rétro-compatibilité : accepte aussi un objet mois direct
-    const newData = await safeWriteMois(data, key, mutatorFn, notifyConflict);
+    const newData = await safeWriteMois(data, key, mutatorFn, notifyConflict, notifyError);
     setData(newData);
   };
   // Idem pour les données globales (catégories, vendeurs, paiements...)
@@ -3126,7 +3176,7 @@ function AppPatron({data,setData,patron,onLogout}){
     const mutatorFn = typeof mutatorFnOrObject==="function"
       ? mutatorFnOrObject
       : ()=>mutatorFnOrObject;
-    const newData = await safeWriteAppData(data, mutatorFn, notifyConflict);
+    const newData = await safeWriteAppData(data, mutatorFn, notifyConflict, notifyError);
     setData(newData);
   };
   const goMois=d=>{
@@ -3162,6 +3212,13 @@ function AppPatron({data,setData,patron,onLogout}){
     {/* Bandeau de conflit — s'affiche quand une écriture concurrente a été détectée et automatiquement résolue */}
     {conflictMsg && <div style={{position:"fixed",top:0,left:0,right:0,zIndex:300,background:C.warn,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:600,textAlign:"center",boxShadow:C.shadowMd}}>
       ⚠️ {conflictMsg}
+    </div>}
+    {/* Bandeau d'erreur réseau — reste affiché jusqu'à fermeture manuelle, car
+        une vraie erreur de sauvegarde peut nécessiter une action du patron
+        (vérifier la connexion, réessayer) plutôt qu'un simple avertissement. */}
+    {errorMsg && <div style={{position:"fixed",top:0,left:0,right:0,zIndex:300,background:C.red,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:600,textAlign:"center",boxShadow:C.shadowMd,display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
+      <span>🔴 {errorMsg}</span>
+      <button onClick={()=>setErrorMsg(null)} style={{...base,background:"rgba(255,255,255,0.2)",border:"none",borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:600,color:"#fff",cursor:"pointer",flexShrink:0}}>OK</button>
     </div>}
     {/* HEADER */}
     <div style={{background:C.white,borderBottom:`1px solid ${C.border}`,padding:"0 16px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,boxShadow:C.shadow}}>
@@ -3237,31 +3294,47 @@ function AppPatron({data,setData,patron,onLogout}){
 export default function App(){
   const [data,setData]=useState(()=>loadCache()||initLocal());
   const [ready,setReady]=useState(false);
-  const [syncError,setSyncError]=useState(false);
+  const [syncError,setSyncError]=useState(null); // null = pas d'erreur, sinon message d'erreur
+  const [retryCount,setRetryCount]=useState(0);
   // Toujours démarrer sur l'écran de connexion
   const [session,setSession]=useState(null); // null | {role:"patron"} | {role:"vendeur", vendeur:{}}
 
   useEffect(()=>{
     let mounted=true;
-    loadFromSupabase().then(remote=>{
+    loadFromSupabase().then(({data:remote, error})=>{
       if(!mounted) return;
       if(remote){
         const migrated = migrateLaboCats(remote);
         setData(migrated); saveCache(migrated);
+        setSyncError(null);
         if(migrated!==remote) saveAppDataToSupabase(migrated);
       }
-      else { setSyncError(true); }
+      else if(error){
+        // Vraie erreur réseau/Supabase : on le signale clairement plutôt que
+        // de basculer silencieusement sur le cache local sans prévenir.
+        const hasCache = !!loadCache();
+        setSyncError(hasCache
+          ? `Connexion au serveur impossible (${error}). Vous travaillez actuellement sur une copie locale enregistrée sur cet appareil — vos nouvelles saisies pourront ne pas se synchroniser tant que la connexion n'est pas rétablie.`
+          : `Connexion au serveur impossible (${error}), et aucune donnée locale disponible sur cet appareil. Vérifiez votre connexion internet puis réessayez.`);
+      }
+      // Si remote est null sans erreur : première utilisation, pas de souci réseau, rien à signaler.
       setReady(true);
     });
     return ()=>{ mounted=false; };
-  },[]);
+  },[retryCount]);
+
+  const reessayerChargement = ()=>{
+    setReady(false);
+    setRetryCount(c=>c+1);
+  };
 
   // Sauvegarde déclenchée par la clôture d'un vendeur
-  const handleVendeurSave=nd=>{
-    saveCache(nd);
+  const handleVendeurSave=async (nd)=>{
+    saveCache(nd); // toujours sauvegardé localement en premier, même si le réseau échoue ensuite
     setData(nd);
     const key=nd.active;
-    saveMoisToSupabase(key, nd.mois[key]);
+    const { success, error } = await saveMoisToSupabase(key, nd.mois[key]);
+    return { success, error };
   };
 
   if(!ready) return (
@@ -3270,6 +3343,30 @@ export default function App(){
       <div style={{color:"#fff",fontWeight:700,fontFamily:"'Inter',sans-serif",fontSize:15}}>Chargement des données…</div>
     </div>
   );
+
+  // Erreur de connexion au démarrage : on informe clairement plutôt que de
+  // laisser l'utilisateur travailler sans savoir que la synchronisation a un
+  // problème (risque de saisies non sauvegardées en ligne, silencieusement).
+  if(syncError){
+    const hasCache = !!loadCache();
+    return (
+      <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#2d6a4f,#1b4332)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+        <div style={{background:"#fff",borderRadius:16,padding:28,maxWidth:420,width:"100%",textAlign:"center"}}>
+          <div style={{fontSize:44,marginBottom:10}}>⚠️</div>
+          <div style={{fontWeight:800,fontSize:17,marginBottom:10,color:"#c1121f"}}>Problème de connexion</div>
+          <div style={{fontSize:13,color:"#6c757d",marginBottom:20,lineHeight:1.5}}>{syncError}</div>
+          <button onClick={reessayerChargement}
+            style={{fontFamily:"'Inter',sans-serif",width:"100%",background:"#2d6a4f",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:14,cursor:"pointer",marginBottom:hasCache?10:0}}>
+            🔄 Réessayer
+          </button>
+          {hasCache && <button onClick={()=>setSyncError(null)}
+            style={{fontFamily:"'Inter',sans-serif",width:"100%",background:"transparent",color:"#6c757d",border:"1px solid #e9ecef",borderRadius:10,padding:"11px",fontWeight:500,fontSize:13,cursor:"pointer"}}>
+            Continuer avec les données locales
+          </button>}
+        </div>
+      </div>
+    );
+  }
 
   // Écran de connexion toujours affiché si pas de session active
   if(!session) return (
