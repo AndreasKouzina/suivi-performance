@@ -704,7 +704,202 @@ function comparaisonSectorielle(data, moisObj, tCA){
   return rows;
 }
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
+// ─── EXPORT MENSUEL (CSV / PDF) ────────────────────────────────────────────────
+// Assemble toutes les données d'un mois donné (charges détaillées par
+// sous-catégorie labo + chaque PDV, encaissements par PDV et mode de
+// paiement, événementiel, dépenses manuelles) avec leur % du CA, pour
+// analyse. Reprend simplement les montants déjà lissés tels que stockés
+// (le lissage éventuel a déjà été appliqué au moment de l'import CSV).
+function assemblerDonneesExport(data, moisObj, moisLabel){
+  const rep = repartition(moisObj.pdv);
+  const tL = totalLabo(data.laboCats, moisObj.laboCh);
+  const pdvCalc = PDV_LIST.map(p=>({...p, c: calcPDV(moisObj.pdv[p.id], data.pdvCats[p.id], rep[p.id], tL)}));
+  const caEvenementiel = n(moisObj.pdv.evenementiel?.ca);
+  const tCA = pdvCalc.reduce((s,p)=>s+p.c.ca,0) + caEvenementiel;
+
+  // 1. Charges détaillées par sous-catégorie (labo + chaque PDV), avec % du CA
+  const ventilation = ventilationCharges(data, moisObj);
+  const charges = Object.values(ventilation)
+    .map(c=>({...c, pctCA: tCA>0 ? (c.montant/tCA)*100 : 0}))
+    .sort((a,b)=>b.montant-a.montant);
+  const totalCharges = charges.reduce((s,c)=>s+c.montant,0);
+
+  // 2. Encaissements par PDV et par mode de paiement
+  const encaissementsParPdv = PDV_LIST.map(p=>{
+    const clotures = moisObj.pdv[p.id]?.clotures||[];
+    const parMode = {};
+    clotures.forEach(cl=>cl.modes.forEach(m=>{
+      const montant = n(m.montant);
+      if(montant>0) parMode[m.label] = (parMode[m.label]||0)+montant;
+    }));
+    const total = Object.values(parMode).reduce((s,v)=>s+v,0);
+    return { pdv:p.nom, total, pctCA: tCA>0?(total/tCA)*100:0, parMode };
+  }).filter(e=>e.total>0);
+
+  // 3. Événementiel
+  const encaissementsEvent = (moisObj.pdv.evenementiel?.encaissements||[]).map(e=>({
+    date: e.dateLabel, montant: n(e.montant), mode: e.modeLabel, pctCA: tCA>0?(n(e.montant)/tCA)*100:0
+  }));
+
+  // 4. Dépenses manuelles (espèces/BL, saisies par patron ou vendeurs)
+  const depensesManuelles = (moisObj.pdv._depenses||[]).map(d=>({
+    date: d.dateLabel, categorie: d.catLabel, scope: d.scope==="labo"?"Labo":(d.pdvLabel||"PDV"),
+    montant: n(d.montant), mode: d.modeLabel, vendeur: d.vendeurNom,
+    pctCA: tCA>0?(n(d.montant)/tCA)*100:0
+  }));
+
+  // 5. Synthèse
+  const totalMat = data.laboCats.filter(c=>c.groupe==="g601"||c.id==="matieres").reduce((s,c)=>s+montantCat(c,moisObj.laboCh),0);
+  const tMB = tCA - totalMat;
+  const totalChargesPDV = totalChargesDirectesPDV(moisObj.pdv, data.pdvCats);
+  const tNet = pdvCalc.reduce((s,p)=>s+p.c.res,0) + caEvenementiel;
+
+  return {
+    moisLabel,
+    tCA, tMB, totalMat, tL, totalChargesPDV, tNet, totalCharges,
+    pctMB: tCA>0?(tMB/tCA)*100:0,
+    pctNet: tCA>0?(tNet/tCA)*100:0,
+    charges, encaissementsParPdv, encaissementsEvent, depensesManuelles, caEvenementiel,
+  };
+}
+
+// Génère le contenu CSV (texte brut, séparateur point-virgule pour Excel FR)
+function genererCsvExport(ex){
+  const lignes = [];
+  const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const pct = v => v.toLocaleString("fr-FR",{minimumFractionDigits:1,maximumFractionDigits:1});
+
+  lignes.push(`Rapport mensuel — ${ex.moisLabel}`);
+  lignes.push("");
+  lignes.push("SYNTHÈSE");
+  lignes.push("Indicateur;Montant (€);% du CA");
+  lignes.push(`CA total;${nb(ex.tCA)};100,0`);
+  lignes.push(`Matières premières;${nb(ex.totalMat)};${pct(ex.tCA>0?ex.totalMat/ex.tCA*100:0)}`);
+  lignes.push(`Marge brute;${nb(ex.tMB)};${pct(ex.pctMB)}`);
+  lignes.push(`Charges labo (total);${nb(ex.tL)};${pct(ex.tCA>0?ex.tL/ex.tCA*100:0)}`);
+  lignes.push(`Charges directes PDV;${nb(ex.totalChargesPDV)};${pct(ex.tCA>0?ex.totalChargesPDV/ex.tCA*100:0)}`);
+  lignes.push(`Résultat net;${nb(ex.tNet)};${pct(ex.pctNet)}`);
+  lignes.push("");
+
+  lignes.push("CHARGES DÉTAILLÉES (labo + tous points de vente)");
+  lignes.push("Sous-catégorie;Groupe comptable;Montant (€);% du CA");
+  ex.charges.forEach(c=>{
+    const groupeLabel = GROUPES_COMPTA.find(g=>g.id===c.groupe)?.label || c.groupe || "";
+    lignes.push(`${c.label};${groupeLabel};${nb(c.montant)};${pct(c.pctCA)}`);
+  });
+  lignes.push(`TOTAL CHARGES;;${nb(ex.totalCharges)};${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}`);
+  lignes.push("");
+
+  lignes.push("ENCAISSEMENTS PAR POINT DE VENTE");
+  lignes.push("Point de vente;Total (€);% du CA;Détail par mode");
+  ex.encaissementsParPdv.forEach(e=>{
+    const detail = Object.entries(e.parMode).map(([m,v])=>`${m}: ${nb(v)}€`).join(" | ");
+    lignes.push(`${e.pdv};${nb(e.total)};${pct(e.pctCA)};"${detail}"`);
+  });
+  lignes.push("");
+
+  if(ex.encaissementsEvent.length>0){
+    lignes.push("ENCAISSEMENTS ÉVÉNEMENTIEL");
+    lignes.push("Date;Montant (€);Mode;% du CA");
+    ex.encaissementsEvent.forEach(e=>lignes.push(`${e.date};${nb(e.montant)};${e.mode};${pct(e.pctCA)}`));
+    lignes.push("");
+  }
+
+  if(ex.depensesManuelles.length>0){
+    lignes.push("DÉPENSES MANUELLES (espèces / BL)");
+    lignes.push("Date;Catégorie;Affecté à;Montant (€);Mode;Saisi par;% du CA");
+    ex.depensesManuelles.forEach(d=>lignes.push(`${d.date};${d.categorie};${d.scope};${nb(d.montant)};${d.mode};${d.vendeur};${pct(d.pctCA)}`));
+  }
+
+  return lignes.join("\n");
+}
+
+// Génère le PDF via impression navigateur : on ouvre une page HTML mise en
+// forme dans un nouvel onglet, puis on déclenche window.print() — l'utilisateur
+// choisit "Enregistrer en PDF" dans la boîte de dialogue d'impression. Cette
+// approche ne nécessite aucune librairie externe, ce qui la rend fiable sur un
+// déploiement statique GitHub Pages (pas de dépendance à un CDN qui pourrait
+// être indisponible).
+function genererPdfExport(ex){
+  const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
+  const pct = v => v.toLocaleString("fr-FR",{minimumFractionDigits:1,maximumFractionDigits:1})+"%";
+
+  const ligneCharge = c => {
+    const groupeLabel = GROUPES_COMPTA.find(g=>g.id===c.groupe)?.label || "";
+    return `<tr><td>${c.label}</td><td class="muted">${groupeLabel}</td><td class="num">${nb(c.montant)}</td><td class="num">${pct(c.pctCA)}</td></tr>`;
+  };
+  const lignePdv = e => {
+    const detail = Object.entries(e.parMode).map(([m,v])=>`${m}: ${nb(v)}`).join(" · ");
+    return `<tr><td>${e.pdv}</td><td class="num">${nb(e.total)}</td><td class="num">${pct(e.pctCA)}</td><td class="muted small">${detail}</td></tr>`;
+  };
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Rapport ${ex.moisLabel}</title>
+<style>
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#212529;padding:32px;max-width:900px;margin:0 auto;}
+  h1{font-size:20px;margin-bottom:2px;}
+  h2{font-size:14px;margin:24px 0 8px;padding-bottom:6px;border-bottom:2px solid #2d6a4f;color:#2d6a4f;}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px;}
+  th{text-align:left;background:#f8f9fa;padding:6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:#6c757d;border-bottom:1px solid #e9ecef;}
+  td{padding:6px 8px;border-bottom:1px solid #f0f0f0;}
+  .num{text-align:right;font-weight:600;}
+  .muted{color:#6c757d;}
+  .small{font-size:10px;}
+  .synthese{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;}
+  .kpi{flex:1;min-width:140px;background:#f8f9fa;border-radius:8px;padding:12px;}
+  .kpi .label{font-size:10px;text-transform:uppercase;color:#6c757d;margin-bottom:4px;}
+  .kpi .val{font-size:18px;font-weight:700;color:#2d6a4f;}
+  .total-row{font-weight:700;background:#f8f9fa;}
+  @media print{ body{padding:0;} }
+</style></head><body>
+  <h1>🫒 Rapport mensuel — ${ex.moisLabel}</h1>
+  <div class="muted small">Généré le ${new Date().toLocaleDateString("fr-FR")}</div>
+
+  <h2>Synthèse</h2>
+  <div class="synthese">
+    <div class="kpi"><div class="label">CA total</div><div class="val">${nb(ex.tCA)}</div></div>
+    <div class="kpi"><div class="label">Marge brute</div><div class="val">${pct(ex.pctMB)}</div></div>
+    <div class="kpi"><div class="label">Charges labo</div><div class="val">${nb(ex.tL)}</div></div>
+    <div class="kpi"><div class="label">Charges PDV</div><div class="val">${nb(ex.totalChargesPDV)}</div></div>
+    <div class="kpi"><div class="label">Résultat net</div><div class="val" style="color:${ex.tNet>=0?'#2d6a4f':'#c1121f'}">${nb(ex.tNet)} (${pct(ex.pctNet)})</div></div>
+  </div>
+
+  <h2>Charges détaillées (labo + tous points de vente)</h2>
+  <table>
+    <tr><th>Sous-catégorie</th><th>Groupe comptable</th><th>Montant</th><th>% du CA</th></tr>
+    ${ex.charges.map(ligneCharge).join("")}
+    <tr class="total-row"><td colspan="2">TOTAL CHARGES</td><td class="num">${nb(ex.totalCharges)}</td><td class="num">${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}</td></tr>
+  </table>
+
+  <h2>Encaissements par point de vente</h2>
+  <table>
+    <tr><th>Point de vente</th><th>Total</th><th>% du CA</th><th>Détail par mode</th></tr>
+    ${ex.encaissementsParPdv.map(lignePdv).join("")}
+  </table>
+
+  ${ex.encaissementsEvent.length>0 ? `
+  <h2>Encaissements événementiel</h2>
+  <table>
+    <tr><th>Date</th><th>Montant</th><th>Mode</th><th>% du CA</th></tr>
+    ${ex.encaissementsEvent.map(e=>`<tr><td>${e.date}</td><td class="num">${nb(e.montant)}</td><td>${e.mode}</td><td class="num">${pct(e.pctCA)}</td></tr>`).join("")}
+  </table>` : ""}
+
+  ${ex.depensesManuelles.length>0 ? `
+  <h2>Dépenses manuelles (espèces / BL)</h2>
+  <table>
+    <tr><th>Date</th><th>Catégorie</th><th>Affecté à</th><th>Montant</th><th>Mode</th><th>Saisi par</th></tr>
+    ${ex.depensesManuelles.map(d=>`<tr><td>${d.date}</td><td>${d.categorie}</td><td class="muted">${d.scope}</td><td class="num">${nb(d.montant)}</td><td>${d.mode}</td><td class="muted small">${d.vendeur}</td></tr>`).join("")}
+  </table>` : ""}
+
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if(!w){ alert("Le navigateur a bloqué l'ouverture de la fenêtre d'impression. Autorisez les pop-ups pour ce site puis réessayez."); return; }
+  w.document.write(html);
+  w.document.close();
+  w.onload = ()=>{ w.focus(); w.print(); };
+}
+
+
 const C={
   bg:"#f8f9fa",white:"#fff",border:"#e9ecef",
   text:"#212529",textMuted:"#6c757d",textLight:"#adb5bd",
@@ -1294,6 +1489,80 @@ function GestionObjectifs({objectifs, onChange}){
     <div style={{fontSize:11,color:C.textLight,marginTop:12,textAlign:"center"}}>
       💾 Les modifications sont enregistrées automatiquement quand vous quittez un champ (ou appuyez sur Entrée).
     </div>
+  </div>;
+}
+
+// ─── EXPORT MENSUEL (onglet dédié) ────────────────────────────────────────────
+// Permet de choisir un mois (le mois en cours ou un mois passé disponible) et
+// d'exporter en CSV ou PDF toutes les charges/encaissements/dépenses du mois,
+// détaillés par sous-catégorie, avec leur % du CA — pour analyse approfondie
+// des postes où des économies sont possibles.
+function PanneauExport({data}){
+  const moisDisponibles = Object.keys(data.mois).sort().reverse();
+  const [moisChoisi, setMoisChoisi] = useState(data.active);
+  const [generating, setGenerating] = useState(false);
+
+  const moisLabel = (key) => {
+    const [a,m] = key.split("-").map(Number);
+    return `${MOIS[m]} ${a}`;
+  };
+
+  const lancerExport = (format) => {
+    setGenerating(true);
+    try{
+      const moisObj = fillPdvKeys(data.mois[moisChoisi] || initMois());
+      const ex = assemblerDonneesExport(data, moisObj, moisLabel(moisChoisi));
+      if(format==="csv"){
+        const csv = genererCsvExport(ex);
+        const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `rapport_${moisChoisi}.csv`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        genererPdfExport(ex);
+      }
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const isMoisEnCours = moisChoisi === moisKey();
+
+  return <div>
+    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
+      <div style={{fontSize:12,color:C.textMuted}}>
+        Exportez toutes les charges, encaissements et dépenses du mois choisi, détaillés par sous-catégorie avec leur % du chiffre d'affaires — pour analyser en détail où se trouvent les postes à optimiser.
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:16}}>
+      <SectionHead>Période</SectionHead>
+      <select value={moisChoisi} onChange={e=>setMoisChoisi(e.target.value)}
+        style={{...base,width:"100%",padding:"10px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:14,marginBottom:8}}>
+        {moisDisponibles.map(k=><option key={k} value={k}>{moisLabel(k)}</option>)}
+      </select>
+      {isMoisEnCours && <div style={{fontSize:11,color:C.textMuted}}>ℹ️ Ce mois est en cours — l'export reflétera les données saisies jusqu'à aujourd'hui.</div>}
+    </Card>
+
+    <Card>
+      <SectionHead>Format d'export</SectionHead>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        <button onClick={()=>lancerExport("pdf")} disabled={generating}
+          style={{...base,flex:1,minWidth:140,background:generating?"#ccc":C.primary,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:14,cursor:generating?"not-allowed":"pointer"}}>
+          📄 Export PDF
+        </button>
+        <button onClick={()=>lancerExport("csv")} disabled={generating}
+          style={{...base,flex:1,minWidth:140,background:generating?"#ccc":C.fixe,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:14,cursor:generating?"not-allowed":"pointer"}}>
+          📊 Export CSV (Excel)
+        </button>
+      </div>
+      <div style={{fontSize:11,color:C.textLight,marginTop:10}}>
+        Le PDF s'ouvre dans un nouvel onglet avec la boîte de dialogue d'impression — choisissez "Enregistrer en PDF" comme destination. Le CSV se télécharge directement, à ouvrir avec Excel ou Google Sheets.
+      </div>
+    </Card>
   </div>;
 }
 
@@ -2841,6 +3110,7 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
     {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
+    {id:"export",label:"Export",icon:"📄"},
     {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
     {id:"rapprochement",label:"Rapprochement",icon:"🔍"},
     {id:"compte",label:"Mon compte",icon:"🔑"},
@@ -2873,7 +3143,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {nav.map(item=>{
           const active=page===item.id;
           let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","objectifs","caisse","rapprochement","compte"].includes(item.id)){
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","objectifs","export","caisse","rapprochement","compte"].includes(item.id)){
             const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
             if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
           }
@@ -2887,7 +3157,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -2900,6 +3170,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
         {page==="objectifs"&&<GestionObjectifs objectifs={data.objectifsSectoriels} onChange={o=>updData(fresh=>({...fresh,objectifsSectoriels:o}))}/>}
+        {page==="export"&&<PanneauExport data={data}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="rapprochement"&&<PanneauRapprochement moisData={md}/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
