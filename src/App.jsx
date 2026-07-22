@@ -3097,6 +3097,9 @@ function AppPatron({data,setData,patron,onLogout}){
   const [page,setPage]=useState("dashboard");
   const [menu,setMenu]=useState(false);
   const [conflictMsg,setConflictMsg]=useState(null);
+  // Repliée par défaut : il faut cliquer pour dérouler les 10 points de vente,
+  // afin que la liste de gauche ne prenne pas trop de place.
+  const [pdvMenuOuvert,setPdvMenuOuvert]=useState(false);
   const key=data.active;
   const [an,mi]=key.split("-").map(Number);
   const getMois=()=>fillPdvKeys(data.mois[key]||initMois());
@@ -3145,7 +3148,6 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"clotures",label:"Clôtures",icon:"📋"},
     {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
-    ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
     {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
@@ -3181,14 +3183,27 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="sidebar" style={{width:224,flexShrink:0,background:C.white,borderRight:`1px solid ${C.border}`,padding:"10px 7px",overflowY:"auto",position:"fixed",top:56,bottom:0,left:0,zIndex:90,transform:menu?"translateX(0)":"translateX(-100%)",transition:"transform 0.22s",boxShadow:menu?C.shadowMd:"none"}}>
         {nav.map(item=>{
           const active=page===item.id;
-          let dot=null;
-          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","objectifs","export","caisse","rapprochement","compte"].includes(item.id)){
-            const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
-            if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
-          }
           return <button key={item.id} onClick={()=>{setPage(item.id);setMenu(false);}}
             style={{...base,width:"100%",textAlign:"left",padding:"10px 12px",borderRadius:8,border:"none",background:active?C.primaryLight:"transparent",color:active?C.primary:C.textMuted,cursor:"pointer",fontWeight:active?600:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
-            <span style={{fontSize:15}}>{item.icon}</span><span style={{flex:1}}>{item.label}</span>{dot}
+            <span style={{fontSize:15}}>{item.icon}</span><span style={{flex:1}}>{item.label}</span>
+          </button>;
+        })}
+
+        {/* Catégorie repliable "Points de vente" — regroupe les 8 marchés + 2
+            boutiques pour ne pas surcharger la liste de gauche. Repliée par
+            défaut. Le Laboratoire reste une entrée indépendante au-dessus. */}
+        <button onClick={()=>setPdvMenuOuvert(o=>!o)}
+          style={{...base,width:"100%",textAlign:"left",padding:"10px 12px",borderRadius:8,border:"none",background:"transparent",color:C.textMuted,cursor:"pointer",fontWeight:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
+          <span style={{fontSize:15}}>🏪</span><span style={{flex:1}}>Points de vente</span>
+          <span style={{fontSize:11,color:C.textLight,transform:pdvMenuOuvert?"rotate(90deg)":"none",transition:"transform 0.15s"}}>›</span>
+        </button>
+        {pdvMenuOuvert && PDV_LIST.map(p=>{
+          const active=page===p.id;
+          const c=calcPDV(md.pdv[p.id],data.pdvCats[p.id],rep[p.id]||0,tL);
+          const dot = (c&&c.ca>0) ? <span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/> : null;
+          return <button key={p.id} onClick={()=>{setPage(p.id);setMenu(false);}}
+            style={{...base,width:"100%",textAlign:"left",padding:"9px 12px 9px 30px",borderRadius:8,border:"none",background:active?C.primaryLight:"transparent",color:active?C.primary:C.textMuted,cursor:"pointer",fontWeight:active?600:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
+            <span style={{fontSize:14}}>{p.emoji}</span><span style={{flex:1}}>{p.nom}</span>{dot}
           </button>;
         })}
       </div>
