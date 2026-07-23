@@ -3397,3 +3397,18 @@ export default function App(){
     />
   );
 }
+
+// ─── EXPORTS POUR LES TESTS AUTOMATISÉS ───────────────────────────────────────
+// Ces exports nommés ne servent qu'au fichier de tests (tests/calculs.test.js)
+// — ils n'affectent en rien le fonctionnement de l'app en production, qui
+// continue d'utiliser `export default App` ci-dessus comme seul point d'entrée.
+// Objectif : permettre de vérifier automatiquement, à chaque mise à jour, que
+// les fonctions de calcul financier (répartition, marges, résultat net...)
+// continuent de produire les bons résultats — sans dupliquer leur code dans
+// un fichier séparé qui pourrait diverger silencieusement du vrai code.
+export {
+  n, montantCat, totalLabo, totalDirect, repartition, calcPDV, caDepuisClotures,
+  totalChargesDirectesPDV, ventilationCharges, topCharges, comparaisonSectorielle,
+  calculerRapprochement, extractKeyword, hashRow, moisLissage,
+  fillPdvKeys, initMois, ensureMois, GROUPES_COMPTA, PDV_LIST, REFERENCES_SECTORIELLES_DEFAUT,
+};
