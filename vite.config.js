@@ -1,7 +1,12 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig, mergeConfig } from 'vitest/config';
+import viteConfig from './vite.config.js';
 
-export default defineConfig({
-  plugins: [react()],
-  base: '/suivi-performance/',
-})
+export default mergeConfig(
+  viteConfig,
+  defineConfig({
+    test: {
+      environment: 'node',
+      include: ['tests/**/*.test.js'],
+    },
+  })
+);
