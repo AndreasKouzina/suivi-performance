@@ -1,0 +1,30 @@
+name: Tests automatisés
+
+# Se déclenche à chaque envoi de code sur la branche principale, ainsi que sur
+# toute Pull Request — pour détecter un calcul cassé AVANT qu'il n'arrive en
+# ligne sur l'application utilisée au quotidien.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Vérification des calculs financiers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Installer les dépendances
+        run: npm install
+
+      - name: Lancer les tests
+        run: npm test
