@@ -405,6 +405,12 @@ function extractKeyword(libelle){
   const isVir = /^VIR /i.test(libelle);
   let clean = libelle
     .replace(/COMCB\d+|REMCB\d+|NB\d+|TPE\d+|CARTE\s?\d+|PSC\s?\d+|CB\s?\d{4}|FAC\sDU.*|RL-[\dA-Z-]+|SIRET\s?\d+|G\d{6,}/gi," ")
+    // Retire aussi les séquences de chiffres isolées (références de
+    // transaction, numéros de carte tronqués, codes de session...) qui
+    // varient souvent d'un export CIC à l'autre pour une même opération —
+    // sans ce nettoyage, la détection de doublons peut manquer une même
+    // transaction réimportée avec un chevauchement volontaire de dates.
+    .replace(/\b\d{2,}\b/g," ")
     .replace(/\s{2,}/g," ").trim();
   return { isComCB, isRemCB, isSumUp, isDepotEspeces, isPrlv, isPaiementCB, isCheque, isVir, clean };
 }
@@ -431,8 +437,17 @@ function moisLissage(startKey, count){
 }
 
 // ─── DÉTECTION DES DOUBLONS D'IMPORT ──────────────────────────────────────────
+// CORRECTIF : on hash le libellé NETTOYÉ (via extractKeyword), pas le libellé
+// brut. Cas réel rencontré : une même amende ("PAIEMENT CB 1807 35 RENNES WEB
+// AMENDE GOUV CARTE 9134") réimportée via un second export qui chevauche
+// volontairement le premier (méthode "lundi à lundi") peut avoir un numéro de
+// référence légèrement différent selon l'export — avec le libellé brut, le
+// hash différait et le doublon passait inaperçu. Le libellé nettoyé retire
+// ces numéros variables (cartes, références, séquences isolées), rendant la
+// détection robuste à ce genre de variation entre deux exports du même relevé.
 function hashRow(row){
-  return `${row.dateOp}|${row.libelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
+  const cleanLibelle = extractKeyword(row.libelle).clean;
+  return `${row.dateOp}|${cleanLibelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
 }
 // Retourne un Map hash -> solde (quand connu) pour les lignes déjà importées.
 // Utilisé à la fois pour exclure les doublons ET pour retrouver, en cas de
