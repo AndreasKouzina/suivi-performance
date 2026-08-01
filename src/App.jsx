@@ -36,33 +36,6 @@ const GROUPES_COMPTA = [
   { id:"g68",  label:"9. Dotations aux amortissements (68)" },
   { id:"g0",   label:"À classer" },
 ];
-
-// ─── RÉFÉRENCES DE PILOTAGE (% du CA) — valeurs par défaut ───────────────────
-// Fourchettes de pilotage adaptées à un modèle de restauration rapide "faite
-// maison" avec vente directe (marchés + boutiques) — production propre en
-// laboratoire central, pas de l'achat-revente ni du traiteur événementiel sur
-// devis. Issues de sources professionnelles françaises de la restauration
-// (blogs spécialisés, cabinets comptables sectoriels — pas de statistiques
-// officielles INSEE disponibles sur ce point depuis 2015).
-//
-// Ce ne sont que des VALEURS PAR DÉFAUT : chaque patron peut les ajuster à sa
-// propre réalité dans l'onglet "🎯 Mes objectifs" (stockées dans app_data,
-// clé `objectifsSectoriels`, elles remplacent alors ces valeurs par défaut).
-//
-// { min, max } = fourchette saine en % du CA. Au-delà de `max`, le poste est
-// à surveiller ; en-deçà de `min` ce n'est pas un problème en soi (sauf pour
-// la marge nette où c'est l'inverse).
-const REFERENCES_SECTORIELLES_DEFAUT = {
-  g601: { label:"Matières premières", min:25, max:35, note:"Restauration avec production propre : 25–35% du CA" },
-  g606: { label:"Fonctionnement (eau, élec, fournitures)", min:3, max:8, note:"Repère indicatif — à ajuster selon votre expérience" },
-  g61:  { label:"Services extérieurs (loyers, droits de place, assurances...)", min:5, max:12, note:"Vos droits de place de marché diffèrent d'un loyer classique — ajustez selon votre réalité" },
-  g62:  { label:"Autres services (pub, déplacements, frais bancaires...)", min:3, max:10, note:"Inclut la logistique multi-sites, spécifique à votre modèle — ajustez selon votre réalité" },
-  g63:  { label:"Impôts et taxes", min:2, max:4, note:"CFE, taxes locales, formation pro" },
-  g64:  { label:"Charges de personnel", min:30, max:40, note:"Production maison (labo + vente) : masse salariale plus élevée que l'achat-revente" },
-  primeCost: { label:"Prime cost (matières + personnel)", min:0, max:65, note:"Ne devrait pas dépasser 60–65% du CA — indicateur de survie" },
-  margeNette: { label:"Marge nette (résultat net)", min:8, max:15, note:"5–10% = bon, 12–15% = très bon, en restauration avec production propre" },
-};
-
 const DEFAULT_COMPTA_CATS = [
   // 1. Achats matières premières — 601/602
   { id:"matieres",        groupe:"g601", label:"Denrées alimentaires",                          type:"variable", montantFixe:0 },
@@ -153,7 +126,6 @@ function fillPdvKeys(moisObj){
   });
   if(!pdv.evenementiel) pdv.evenementiel = {ca:0, encaissements:[]};
   if(!pdv._depenses) pdv._depenses = [];
-  if(!pdv._rapprochements) pdv._rapprochements = [];
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
 }
 function initLocal(){
@@ -163,7 +135,6 @@ function initLocal(){
     pdvCats:  Object.fromEntries(PDV_LIST.map(p=>[p.id, DEFAULT_PDV_CATS.map(c=>({...c}))])),
     paiements: DEFAULT_PAIEMENTS.map(p=>({...p})),
     vendeurs: [],
-    objectifsSectoriels: JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
     active: key,
     mois: { [key]: initMois() }
   };
@@ -178,9 +149,20 @@ function ensureMois(data, key){
 function reconcilierDepenses(moisObj){
   const depenses = moisObj.pdv._depenses || [];
   if(depenses.length===0) return moisObj;
+
+  // Recalcule les vars uniquement depuis les sources fiables :
+  // 1. On ne touche pas aux vars existants qui viennent du CSV ou de l'onglet Dépenses patron
+  // 2. On s'assure juste que chaque dépense vendeur est reflétée
+  // Méthode : on compare ce qui devrait être dans vars vs ce qui y est
+  // Pour éviter les doubles comptages, on ne fait rien ici — les dépenses
+  // vendeur sont déjà appliquées au moment de la saisie.
+  // Ce flag est juste pour s'assurer que fillPdvKeys initialise bien les vars.
   return moisObj;
 }
 // Migration vers le plan comptable (catégories/sous-catégories).
+// Les anciens ids sont conservés (renommés + rattachés à leur groupe) pour que
+// les montants déjà saisis (juillet...) restent visibles. Les sous-catégories
+// manquantes sont ajoutées.
 const MIGRATION_RENAME = {
   matieres:  ["Denrées alimentaires","g601"],
   packaging: ["Emballages / contenants / vaisselle jetable","g601"],
@@ -209,6 +191,7 @@ function upgradeCatList(list){
 }
 function migrateLaboCats(data){
   if(data.catsVersion===2){
+    // Déjà migré : on s'assure juste que chaque PDV a ses catégories
     let pdvCats = {...data.pdvCats}; let changed=false;
     PDV_LIST.forEach(p=>{
       if(!pdvCats[p.id]){ pdvCats[p.id]=DEFAULT_COMPTA_CATS.map(c=>({...c})); changed=true; }
@@ -225,10 +208,9 @@ function migrateLaboCats(data){
 async function loadFromSupabase(){
   try{
     const { data: appRow, error: e1 } = await supabase.from("app_data").select("*").eq("id","main").maybeSingle();
-    if(e1) { console.error("Supabase load error (app_data):", e1); return { data:null, error:e1.message||"Erreur de connexion" }; }
-    if(!appRow) return { data:null, error:null }; // pas d'erreur réseau, juste pas encore de données (première utilisation)
+    if(e1 || !appRow) return null;
     const { data: moisRows, error: e2 } = await supabase.from("mois_data").select("*");
-    if(e2) { console.error("Supabase load error (mois_data):", e2); return { data:null, error:e2.message||"Erreur de connexion" }; }
+    if(e2) return null;
     const mois = {};
     (moisRows||[]).forEach(r=>{ mois[r.mois_key] = fillPdvKeys({ laboCh: r.labo_ch||{}, pdv: r.pdv||{} }); });
     const key = appRow.active_mois || moisKey();
@@ -237,118 +219,39 @@ async function loadFromSupabase(){
       pdvCats: Object.keys(appRow.pdv_cats||{}).length ? appRow.pdv_cats : Object.fromEntries(PDV_LIST.map(p=>[p.id, DEFAULT_PDV_CATS.map(c=>({...c}))])),
       paiements: appRow.paiements?.length ? appRow.paiements : DEFAULT_PAIEMENTS.map(p=>({...p})),
       vendeurs: appRow.vendeurs || [],
-      // Objectifs personnalisés de comparaison sectorielle (onglet "Mes objectifs").
-      // Repli sur les valeurs par défaut si absent (première utilisation, ou
-      // colonne objectifs_sectoriels pas encore créée côté Supabase).
-      objectifsSectoriels: (appRow.objectifs_sectoriels && Object.keys(appRow.objectifs_sectoriels).length)
-        ? appRow.objectifs_sectoriels
-        : JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
       active: key,
       mois: Object.keys(mois).length ? mois : { [key]: initMois() }
     };
     result = ensureMois(result, key);
-    return { data:result, error:null };
-  }catch(err){ console.error("Supabase load error:", err); return { data:null, error: err?.message || "Erreur réseau inattendue" }; }
+    return result;
+  }catch(err){ console.error("Supabase load error:", err); return null; }
 }
 
 // Sauvegarde app_data (config globale) — debounced côté appelant
 async function saveAppDataToSupabase(data){
   try{
-    const { error } = await supabase.from("app_data").upsert({
+    await supabase.from("app_data").upsert({
       id: "main",
       labo_cats: data.laboCats,
       pdv_cats: data.pdvCats,
       paiements: data.paiements,
       vendeurs: data.vendeurs,
-      objectifs_sectoriels: data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT,
       active_mois: data.active,
       updated_at: new Date().toISOString()
     });
-    if(error){ console.error("Supabase save app_data error:", error); return { success:false, error: error.message||"Erreur de sauvegarde" }; }
-    return { success:true, error:null };
-  }catch(err){ console.error("Supabase save app_data error:", err); return { success:false, error: err?.message || "Erreur réseau inattendue" }; }
+  }catch(err){ console.error("Supabase save app_data error:", err); }
 }
 
 // Sauvegarde un mois précis
 async function saveMoisToSupabase(key, moisObj){
   try{
-    const { error } = await supabase.from("mois_data").upsert({
+    await supabase.from("mois_data").upsert({
       mois_key: key,
       labo_ch: moisObj.laboCh,
       pdv: moisObj.pdv,
       updated_at: new Date().toISOString()
     });
-    if(error){ console.error("Supabase save mois_data error:", error); return { success:false, error: error.message||"Erreur de sauvegarde" }; }
-    return { success:true, error:null };
-  }catch(err){ console.error("Supabase save mois_data error:", err); return { success:false, error: err?.message || "Erreur réseau inattendue" }; }
-}
-
-// ─── ÉCRITURE SÉCURISÉE (anti-écrasement) ─────────────────────────────────────
-// Point d'entrée UNIQUE pour toute modification des données de l'app.
-// Principe : on ne modifie JAMAIS le state React local directement dans Supabase.
-// On recharge toujours la version la plus fraîche depuis Supabase juste avant
-// d'écrire, on applique la modification demandée par-dessus cette version
-// fraîche, puis on sauvegarde. Ça élimine toute la classe de bugs où deux
-// écritures concurrentes (deux onglets, un vendeur + un patron, un import CSV
-// en cours...) s'écrasent l'une l'autre au lieu de se cumuler.
-//
-// conflictNotifier (optionnel) : callback appelé si on détecte que la donnée
-// en base avait changé depuis le dernier chargement connu du state local —
-// utile pour informer l'utilisateur plutôt que de silencieusement écraser.
-let lastKnownRemoteSnapshot = null; // pour détection de conflit (best-effort)
-
-async function safeWriteMois(currentData, key, mutatorFn, conflictNotifier, errorNotifier){
-  const { data: remote, error: loadErr } = await loadFromSupabase();
-  if(loadErr && errorNotifier){
-    errorNotifier(`Impossible de vérifier les dernières données avant d'écrire (${loadErr}). Réessayez dans quelques instants — rien n'a été perdu localement.`);
-  }
-  const freshData = remote ? migrateLaboCats(remote) : currentData;
-  const freshMois = fillPdvKeys(freshData.mois[key] || initMois());
-
-  // Détection de conflit best-effort : si le mois distant existait déjà dans
-  // notre state local ET diffère de ce qu'on avait en mémoire, quelqu'un
-  // d'autre a écrit entre-temps.
-  if(conflictNotifier && currentData.mois[key]){
-    const localSerialized = JSON.stringify(fillPdvKeys(currentData.mois[key]));
-    const remoteSerialized = JSON.stringify(freshMois);
-    if(localSerialized !== remoteSerialized){
-      conflictNotifier();
-    }
-  }
-
-  const newMois = mutatorFn(freshMois);
-  const { success, error: saveErr } = await saveMoisToSupabase(key, newMois);
-  const newData = {...freshData, mois:{...freshData.mois, [key]:newMois}};
-  saveCache(newData); // toujours sauvegardé en local, même si l'écriture distante échoue
-  if(!success && errorNotifier){
-    errorNotifier(`⚠️ La sauvegarde en ligne a échoué (${saveErr}). Votre saisie est conservée localement sur cet appareil — reconnectez-vous puis ressaisissez cette action pour la synchroniser, ou contactez le support si le problème persiste.`);
-  }
-  return newData;
-}
-
-// Variante pour les données globales (app_data) : catégories, vendeurs, paiements...
-async function safeWriteAppData(currentData, mutatorFn, conflictNotifier, errorNotifier){
-  const { data: remote, error: loadErr } = await loadFromSupabase();
-  if(loadErr && errorNotifier){
-    errorNotifier(`Impossible de vérifier les dernières données avant d'écrire (${loadErr}). Réessayez dans quelques instants — rien n'a été perdu localement.`);
-  }
-  const freshData = remote ? migrateLaboCats(remote) : currentData;
-
-  if(conflictNotifier){
-    const localSerialized = JSON.stringify({laboCats:currentData.laboCats,pdvCats:currentData.pdvCats,paiements:currentData.paiements,vendeurs:currentData.vendeurs});
-    const remoteSerialized = JSON.stringify({laboCats:freshData.laboCats,pdvCats:freshData.pdvCats,paiements:freshData.paiements,vendeurs:freshData.vendeurs});
-    if(localSerialized !== remoteSerialized){
-      conflictNotifier();
-    }
-  }
-
-  const newData = mutatorFn(freshData);
-  const { success, error: saveErr } = await saveAppDataToSupabase(newData);
-  saveCache(newData);
-  if(!success && errorNotifier){
-    errorNotifier(`⚠️ La sauvegarde en ligne a échoué (${saveErr}). Votre modification est conservée localement sur cet appareil — reconnectez-vous puis ressaisissez cette action pour la synchroniser, ou contactez le support si le problème persiste.`);
-  }
-  return newData;
+  }catch(err){ console.error("Supabase save mois_data error:", err); }
 }
 
 // ─── IMPORT CSV — parsing, règles, classification ─────────────────────────────
@@ -373,21 +276,17 @@ function parseCicCsv(text){
   for(const line of lines){
     const parts=line.split(";");
     if(parts.length<5) continue;
-    const [dateOp,dateVal,debit,credit,libelle,solde] = parts;
+    const [dateOp,dateVal,debit,credit,libelle] = parts;
+    // Ignorer l'en-tête éventuel
     if(!/^\d{2}\/\d{2}\/\d{4}$/.test(dateOp)) continue;
     const montantDebit = debit ? Math.abs(n(debit.replace(",","."))) : 0;
     const montantCredit = credit ? Math.abs(n(credit.replace(",","."))) : 0;
-    // Le solde n'est pas toujours présent sur chaque ligne selon l'export CIC ;
-    // on ne le garde que s'il ressemble à un nombre valide.
-    const soldeStr = (solde||"").trim();
-    const montantSolde = soldeStr && /^-?[\d\s]+([.,]\d+)?$/.test(soldeStr) ? n(soldeStr.replace(/\s/g,"").replace(",",".")) : null;
     rows.push({
       id: uid(),
       dateOp, dateVal,
       libelle: (libelle||"").trim(),
       debit: montantDebit,
       credit: montantCredit,
-      solde: montantSolde,
     });
   }
   return rows;
@@ -397,26 +296,20 @@ function parseCicCsv(text){
 function extractKeyword(libelle){
   const isComCB = /^COMCB/i.test(libelle);
   const isRemCB = /^REMCB/i.test(libelle);
-  const isSumUp = /SUMUP/i.test(libelle);
-  const isDepotEspeces = /VERSEMENT|REMISE NUM/i.test(libelle);
   const isPrlv = /^PRLV/i.test(libelle);
   const isPaiementCB = /PAIEMENT CB|PAIEMENT PSC/i.test(libelle);
   const isCheque = /^CHEQUE/i.test(libelle);
   const isVir = /^VIR /i.test(libelle);
+  // Mot-clé "propre" : on retire les codes numériques, dates, références
   let clean = libelle
     .replace(/COMCB\d+|REMCB\d+|NB\d+|TPE\d+|CARTE\s?\d+|PSC\s?\d+|CB\s?\d{4}|FAC\sDU.*|RL-[\dA-Z-]+|SIRET\s?\d+|G\d{6,}/gi," ")
-    // Retire aussi les séquences de chiffres isolées (références de
-    // transaction, numéros de carte tronqués, codes de session...) qui
-    // varient souvent d'un export CIC à l'autre pour une même opération —
-    // sans ce nettoyage, la détection de doublons peut manquer une même
-    // transaction réimportée avec un chevauchement volontaire de dates.
-    .replace(/\b\d{2,}\b/g," ")
     .replace(/\s{2,}/g," ").trim();
-  return { isComCB, isRemCB, isSumUp, isDepotEspeces, isPrlv, isPaiementCB, isCheque, isVir, clean };
+  return { isComCB, isRemCB, isPrlv, isPaiementCB, isCheque, isVir, clean };
 }
 
 function findRuleMatch(clean, rules){
   const upper=clean.toUpperCase();
+  // recherche du mot-clé le plus long contenu dans le libellé
   let best=null, bestLen=0;
   for(const kw of Object.keys(rules)){
     if(upper.includes(kw.toUpperCase()) && kw.length>bestLen){ best=kw; bestLen=kw.length; }
@@ -437,136 +330,31 @@ function moisLissage(startKey, count){
 }
 
 // ─── DÉTECTION DES DOUBLONS D'IMPORT ──────────────────────────────────────────
-// CORRECTIF : on hash le libellé NETTOYÉ (via extractKeyword), pas le libellé
-// brut. Cas réel rencontré : une même amende ("PAIEMENT CB 1807 35 RENNES WEB
-// AMENDE GOUV CARTE 9134") réimportée via un second export qui chevauche
-// volontairement le premier (méthode "lundi à lundi") peut avoir un numéro de
-// référence légèrement différent selon l'export — avec le libellé brut, le
-// hash différait et le doublon passait inaperçu. Le libellé nettoyé retire
-// ces numéros variables (cartes, références, séquences isolées), rendant la
-// détection robuste à ce genre de variation entre deux exports du même relevé.
 function hashRow(row){
-  const cleanLibelle = extractKeyword(row.libelle).clean;
-  return `${row.dateOp}|${cleanLibelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
+  return `${row.dateOp}|${row.libelle}|${row.debit.toFixed(2)}|${row.credit.toFixed(2)}`;
 }
-// Retourne un Map hash -> solde (quand connu) pour les lignes déjà importées.
-// Utilisé à la fois pour exclure les doublons ET pour retrouver, en cas de
-// chevauchement entre deux imports, le solde bancaire juste avant la première
-// ligne réellement NOUVELLE de cet import — indispensable pour que la
-// Vérification A ne se déclenche pas à tort à cause du chevauchement.
+// Vérifie quelles lignes (par leur hash) ont déjà été importées précédemment
 async function checkDuplicateHashes(rows){
   try{
     const hashes = rows.map(hashRow);
-    const dup = new Map(); // hash -> solde connu (ou null si non stocké)
+    const dup = new Set();
+    // Supabase .in() limite raisonnable : on découpe par lots de 200
     for(let i=0;i<hashes.length;i+=200){
       const batch = hashes.slice(i,i+200);
-      const { data, error } = await supabase.from("imported_lines").select("hash, solde").in("hash", batch);
-      if(!error && data) data.forEach(d=>dup.set(d.hash, d.solde ?? null));
+      const { data, error } = await supabase.from("imported_lines").select("hash").in("hash", batch);
+      if(!error && data) data.forEach(d=>dup.add(d.hash));
     }
     return dup;
-  }catch(err){ console.error("check duplicates error",err); return new Map(); }
+  }catch(err){ console.error("check duplicates error",err); return new Set(); }
 }
+// Enregistre les lignes de cet import comme "vues" pour détecter les futurs doublons
 async function markRowsImported(rows){
   try{
-    const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString(), solde: r.solde ?? null }));
+    const records = rows.map(r=>({ hash: hashRow(r), applied_at: new Date().toISOString() }));
     for(let i=0;i<records.length;i+=200){
       await supabase.from("imported_lines").upsert(records.slice(i,i+200));
     }
   }catch(err){ console.error("mark imported error",err); }
-}
-
-// ─── RAPPROCHEMENT BANCAIRE ────────────────────────────────────────────────────
-// Deux vérifications complémentaires, faites sur les données BRUTES du CSV
-// (avant tout classement manuel) :
-//
-// A) Le solde : on additionne les mouvements du fichier et on vérifie qu'on
-//    retombe sur le solde de fin annoncé par la banque. Ça confirme que le
-//    fichier a été lu en entier et sans erreur — indépendamment de la façon
-//    dont chaque ligne a ensuite été catégorisée.
-//
-//    Point important : quand un import chevauche partiellement un import
-//    précédent (cas courant et volontaire, pour ne rien louper), les lignes
-//    en doublon ne doivent PAS être comptées une seconde fois dans le calcul.
-//    On se sert du solde déjà connu (stocké lors du import précédent, table
-//    imported_lines) de la DERNIÈRE ligne doublon comme point de départ fiable
-//    du calcul, et on n'additionne ensuite que les lignes réellement
-//    NOUVELLES de cet import. Si aucune ligne doublon n'a de solde connu (premier
-//    import, ou chevauchement total), on retombe sur la première ligne du
-//    fichier comme avant.
-//
-// B) L'exhaustivité : on vérifie qu'aucun crédit inhabituel (un encaissement
-//    qui n'est ni un règlement CB/SumUp/dépôt espèces déjà couvert par les
-//    clôtures) n'est resté sans classement — car ce type de ligne doit
-//    toujours attirer l'attention du patron (remboursement fournisseur, etc.)
-//
-// `duplicateMap` : Map hash -> solde connu, retournée par checkDuplicateHashes.
-// `allRows` : TOUTES les lignes lues du fichier (avant exclusion des doublons),
-//             dans l'ordre chronologique du CSV — nécessaire pour retrouver la
-//             frontière entre "déjà connu" et "nouveau".
-function calculerRapprochement(allRows, duplicateMap, pending){
-  const rowsAvecSolde = allRows.filter(r=>r.solde!==null && r.solde!==undefined);
-  let verifSolde = null;
-
-  if(rowsAvecSolde.length>=1){
-    // On cherche la DERNIÈRE ligne (dans l'ordre du fichier) qui est à la
-    // fois un doublon connu ET dont le solde stocké est disponible : c'est
-    // notre point de départ fiable, juste avant la zone réellement nouvelle.
-    let pointDepart = null; // { solde, index }
-    rowsAvecSolde.forEach((r,idx)=>{
-      const isDup = duplicateMap.has(hashRow(r));
-      const soldeConnu = duplicateMap.get(hashRow(r));
-      if(isDup && soldeConnu!==null && soldeConnu!==undefined){
-        pointDepart = { solde: soldeConnu, index: idx };
-      }
-    });
-
-    let soldeDepart, ligneDepartIdx;
-    if(pointDepart){
-      // On repart du solde connu de la dernière ligne doublon, et on
-      // n'additionne que les lignes qui suivent (les nouvelles).
-      soldeDepart = pointDepart.solde;
-      ligneDepartIdx = pointDepart.index + 1;
-    } else {
-      // Pas de doublon avec solde connu (premier import, ou aucune ligne
-      // chevauchante) : on repart comme avant, de la première ligne du fichier.
-      const premiere = rowsAvecSolde[0];
-      soldeDepart = premiere.solde - premiere.credit + premiere.debit;
-      ligneDepartIdx = 0;
-    }
-
-    const derniere = rowsAvecSolde[rowsAvecSolde.length-1];
-    const rowsAConsiderer = rowsAvecSolde.slice(ligneDepartIdx);
-    const totalMouvements = rowsAConsiderer.reduce((s,r)=>s + r.credit - r.debit, 0);
-    const soldeTheorique = soldeDepart + totalMouvements;
-    const soldeAnnonce = derniere.solde;
-    const ecart = Math.round((soldeTheorique - soldeAnnonce) * 100) / 100;
-    verifSolde = {
-      possible: true,
-      soldeDepart, soldeTheorique, soldeAnnonce, ecart,
-      coherent: Math.abs(ecart) < 0.01,
-      chevauchementDetecte: !!pointDepart,
-      nbLignesExclues: pointDepart ? pointDepart.index+1 : 0,
-    };
-  } else {
-    verifSolde = { possible:false };
-  }
-
-  // Vérification B — exhaustivité des crédits inhabituels
-  // On exclut les crédits déjà couverts par les clôtures (REMCB, SumUp,
-  // dépôts d'espèces) : ceux-là sont normaux et ne doivent jamais remonter
-  // ici. Seuls les AUTRES crédits (remboursements fournisseurs, etc.) sans
-  // classement choisi comptent comme "à vérifier". On ne regarde que les
-  // lignes non-doublons (celles réellement soumises au classement).
-  const rowsNonDoublons = allRows.filter(r=>!duplicateMap.has(hashRow(r)));
-  const creditsInhabituelsNonClasses = rowsNonDoublons.filter(r=>{
-    if(r.credit<=0) return false;
-    const k = extractKeyword(r.libelle);
-    if(k.isRemCB || k.isSumUp || k.isDepotEspeces) return false;
-    const choix = pending[r.id];
-    return !choix || choix.type==="ignore";
-  });
-
-  return { verifSolde, creditsInhabituelsNonClasses };
 }
 
 // ─── AUTHENTIFICATION PATRONS (via fonctions sécurisées Supabase) ────────────
@@ -593,9 +381,34 @@ async function updatePatronPassword(patronId, newPassword){
   }catch(err){ console.error("update password error",err); return false; }
 }
 
+// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
+async function logActivity(patron, action, detail={}){
+  try{
+    await supabase.from("activity_log").insert({
+      id: uid(),
+      patron_id: patron.id,
+      patron_nom: patron.nom,
+      action,
+      detail,
+      created_at: new Date().toISOString()
+    });
+  }catch(err){ console.error("log activity error",err); }
+}
+
+async function loadActivityLog(limit=100){
+  try{
+    const { data, error } = await supabase.from("activity_log")
+      .select("*").order("created_at", {ascending:false}).limit(limit);
+    if(error) return [];
+    return data||[];
+  }catch(err){ console.error("load activity log error",err); return []; }
+}
+
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
+// Pour les charges fixes : montantFixe (récurrent) + vars[id] (dépenses ponctuelles supplémentaires)
+// Pour les charges variables : vars[id] uniquement (saisi chaque mois)
 function montantCat(cat, vars){ 
   return cat.type==="fixe" 
     ? n(cat.montantFixe) + n(vars?.[cat.id])
@@ -621,356 +434,7 @@ function caDepuisClotures(clotures=[]){
   return clotures.reduce((s,cl)=>s+cl.modes.reduce((a,m)=>a+n(m.montant),0),0);
 }
 
-// ─── OUTILS DE PILOTAGE (identification des postes de charge dominants) ──────
-
-// Total des charges directes cumulées sur tous les PDV pour un mois donné.
-function totalChargesDirectesPDV(moisPdv, pdvCats){
-  return PDV_LIST.reduce((s,p)=>s + totalDirect(pdvCats[p.id]||[], moisPdv[p.id]?.vars), 0);
-}
-
-// Calcule, pour un mois donné, le montant de CHAQUE sous-catégorie de charge
-// (labo + tous les PDV confondus), en les regroupant par label pour que
-// "Loyers" du labo et "Loyers" d'un PDV comptent ensemble s'ils portent le
-// même nom — sinon on distingue par "label (source)".
-function ventilationCharges(data, moisObj){
-  const map = {}; // clé -> { label, montant, groupe }
-  const addTo = (key, label, montant, groupe) => {
-    if(!map[key]) map[key] = { label, montant:0, groupe };
-    map[key].montant += montant;
-  };
-  // Labo
-  (data.laboCats||[]).forEach(cat=>{
-    const montant = montantCat(cat, moisObj.laboCh);
-    if(montant>0) addTo(`labo:${cat.id}`, `${cat.label} (Labo)`, montant, cat.groupe);
-  });
-  // Chaque PDV
-  PDV_LIST.forEach(p=>{
-    const cats = data.pdvCats[p.id]||[];
-    cats.forEach(cat=>{
-      const montant = montantCat(cat, moisObj.pdv[p.id]?.vars);
-      if(montant>0) addTo(`${p.id}:${cat.id}`, `${cat.label} (${p.nom})`, montant, cat.groupe);
-    });
-  });
-  return map;
-}
-
-// Calcule le Top N des charges du mois actif, avec comparaison à la moyenne
-// des `histCount` mois précédents pour détecter les postes en dérive.
-function topCharges(data, moisActif, moisKeyActif, topN=8, histCount=3){
-  const current = ventilationCharges(data, moisActif);
-
-  // Moyenne des mois précédents disponibles (jusqu'à histCount mois)
-  const [a,m] = moisKeyActif.split("-").map(Number);
-  const prevKeys = [];
-  for(let i=1;i<=histCount;i++){
-    let mm=m-i, aa=a;
-    while(mm<0){ mm+=12; aa--; }
-    prevKeys.push(`${aa}-${mm}`);
-  }
-  const histMoisList = prevKeys.map(k=>data.mois[k]).filter(Boolean).map(fillPdvKeys);
-  const histVentilations = histMoisList.map(hm=>ventilationCharges(data, hm));
-
-  const rows = Object.entries(current).map(([key,{label,montant,groupe}])=>{
-    const histValues = histVentilations.map(v=>v[key]?.montant||0);
-    const histAvg = histValues.length>0 ? histValues.reduce((s,v)=>s+v,0)/histValues.length : null;
-    let ecartPct = null;
-    if(histAvg!==null && histAvg>0){
-      ecartPct = ((montant-histAvg)/histAvg)*100;
-    }
-    return { key, label, montant, groupe, histAvg, ecartPct, isAnomalie: ecartPct!==null && ecartPct>=50 };
-  });
-
-  rows.sort((r1,r2)=>r2.montant-r1.montant);
-  return rows.slice(0, topN);
-}
-
-// ─── COMPARAISON SECTORIELLE ──────────────────────────────────────────────────
-// Pour chaque groupe comptable, calcule le montant réel du mois (labo + tous
-// les PDV confondus), son % du CA, et le compare à la fourchette de référence
-// sectorielle (REFERENCES_SECTORIELLES_DEFAUT, ou objectifs personnalisés si définis). Ajoute aussi le prime cost (matières
-// + personnel) et la marge nette, deux indicateurs de synthèse.
-// Statut retourné pour chaque ligne : "bon" (dans la fourchette ou en-dessous
-// du max, sauf marge nette où c'est l'inverse), "attention" (léger dépassement,
-// jusqu'à +20% du max), "alerte" (dépassement important).
-function comparaisonSectorielle(data, moisObj, tCA){
-  if(tCA<=0) return [];
-  const refs = data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT;
-
-  // Montant réel par groupe comptable = labo + tous les PDV
-  const parGroupe = {};
-  GROUPES_COMPTA.forEach(g=>{ parGroupe[g.id]=0; });
-  (data.laboCats||[]).forEach(cat=>{ parGroupe[cat.groupe] = (parGroupe[cat.groupe]||0) + montantCat(cat, moisObj.laboCh); });
-  PDV_LIST.forEach(p=>{
-    (data.pdvCats[p.id]||[]).forEach(cat=>{ parGroupe[cat.groupe] = (parGroupe[cat.groupe]||0) + montantCat(cat, moisObj.pdv[p.id]?.vars); });
-  });
-
-  const evalStatut = (pct, ref, inverse=false) => {
-    if(inverse){
-      // Pour la marge nette : en-dessous du min = problème, au-dessus = bon
-      if(pct>=ref.min) return "bon";
-      if(pct>=ref.min*0.7) return "attention";
-      return "alerte";
-    }
-    if(pct<=ref.max) return "bon";
-    if(pct<=ref.max*1.2) return "attention";
-    return "alerte";
-  };
-
-  const rows = Object.keys(refs)
-    .filter(k=>k!=="primeCost" && k!=="margeNette")
-    .map(groupeId=>{
-      const ref = refs[groupeId];
-      const montant = parGroupe[groupeId]||0;
-      const pct = (montant/tCA)*100;
-      return { key:groupeId, label:ref.label, montant, pct, ref, statut: evalStatut(pct, ref) };
-    });
-
-  // Prime cost = matières premières (g601) + personnel (g64)
-  const primeCostMontant = (parGroupe.g601||0) + (parGroupe.g64||0);
-  const primeCostPct = (primeCostMontant/tCA)*100;
-  rows.push({
-    key:"primeCost", label:refs.primeCost.label, montant:primeCostMontant, pct:primeCostPct,
-    ref:refs.primeCost, statut: evalStatut(primeCostPct, refs.primeCost), isSynthese:true
-  });
-
-  return rows;
-}
-
-// ─── EXPORT MENSUEL (CSV / PDF) ────────────────────────────────────────────────
-// Assemble toutes les données d'un mois donné (charges détaillées par
-// sous-catégorie labo + chaque PDV, encaissements par PDV et mode de
-// paiement, événementiel, dépenses manuelles) avec leur % du CA, pour
-// analyse. Reprend simplement les montants déjà lissés tels que stockés
-// (le lissage éventuel a déjà été appliqué au moment de l'import CSV).
-function assemblerDonneesExport(data, moisObj, moisLabel){
-  const rep = repartition(moisObj.pdv);
-  const tL = totalLabo(data.laboCats, moisObj.laboCh);
-  const pdvCalc = PDV_LIST.map(p=>({...p, c: calcPDV(moisObj.pdv[p.id], data.pdvCats[p.id], rep[p.id], tL)}));
-  const caEvenementiel = n(moisObj.pdv.evenementiel?.ca);
-  const tCA = pdvCalc.reduce((s,p)=>s+p.c.ca,0) + caEvenementiel;
-
-  // 1. Charges détaillées par sous-catégorie (labo + chaque PDV), avec % du CA,
-  // regroupées et triées par GROUPE COMPTABLE (1. Matières premières → 9.
-  // Amortissements) plutôt que par montant — pour une lecture structurée,
-  // cohérente avec le plan comptable déjà utilisé partout ailleurs dans l'app.
-  const ventilation = ventilationCharges(data, moisObj);
-  const chargesBrutes = Object.values(ventilation).map(c=>({...c, pctCA: tCA>0 ? (c.montant/tCA)*100 : 0}));
-  const totalCharges = chargesBrutes.reduce((s,c)=>s+c.montant,0);
-
-  const groupesCharges = GROUPES_COMPTA.map(g=>{
-    const items = chargesBrutes.filter(c=>c.groupe===g.id).sort((a,b)=>b.montant-a.montant);
-    const totalGroupe = items.reduce((s,c)=>s+c.montant,0);
-    return { groupeId:g.id, groupeLabel:g.label, items, totalGroupe, pctCA: tCA>0?(totalGroupe/tCA)*100:0 };
-  }).filter(g=>g.items.length>0);
-  // Sous-catégories personnalisées sans groupe reconnu, en dernier
-  const chargesSansGroupe = chargesBrutes.filter(c=>!GROUPES_COMPTA.find(g=>g.id===c.groupe));
-  if(chargesSansGroupe.length>0){
-    const totalGroupe = chargesSansGroupe.reduce((s,c)=>s+c.montant,0);
-    groupesCharges.push({ groupeId:"autre", groupeLabel:"Autres / personnalisées", items:chargesSansGroupe, totalGroupe, pctCA: tCA>0?(totalGroupe/tCA)*100:0 });
-  }
-
-  // 2. Encaissements par PDV et par mode de paiement
-  const encaissementsParPdv = PDV_LIST.map(p=>{
-    const clotures = moisObj.pdv[p.id]?.clotures||[];
-    const parMode = {};
-    clotures.forEach(cl=>cl.modes.forEach(m=>{
-      const montant = n(m.montant);
-      if(montant>0) parMode[m.label] = (parMode[m.label]||0)+montant;
-    }));
-    const total = Object.values(parMode).reduce((s,v)=>s+v,0);
-    return { pdv:p.nom, total, pctCA: tCA>0?(total/tCA)*100:0, parMode };
-  }).filter(e=>e.total>0);
-
-  // 2bis. Classement des PDV par rentabilité (CA + résultat net), pour la
-  // page dédiée "Détail par point de vente" de l'export — vue simple, sans
-  // le détail des charges (juste CA et résultat net, comme sur le Dashboard).
-  const classementPdv = [...pdvCalc]
-    .sort((a,b)=>b.c.res-a.c.res)
-    .map(p=>({ pdv:p.full, ca:p.c.ca, resultatNet:p.c.res, pctNet:p.c.pctNet }));
-
-  // 3. Événementiel
-  const encaissementsEvent = (moisObj.pdv.evenementiel?.encaissements||[]).map(e=>({
-    date: e.dateLabel, montant: n(e.montant), mode: e.modeLabel, pctCA: tCA>0?(n(e.montant)/tCA)*100:0
-  }));
-
-  // 4. Dépenses manuelles (espèces/BL, saisies par patron ou vendeurs)
-  const depensesManuelles = (moisObj.pdv._depenses||[]).map(d=>({
-    date: d.dateLabel, categorie: d.catLabel, scope: d.scope==="labo"?"Labo":(d.pdvLabel||"PDV"),
-    montant: n(d.montant), mode: d.modeLabel, vendeur: d.vendeurNom,
-    pctCA: tCA>0?(n(d.montant)/tCA)*100:0
-  }));
-
-  // 5. Synthèse
-  const totalMat = data.laboCats.filter(c=>c.groupe==="g601"||c.id==="matieres").reduce((s,c)=>s+montantCat(c,moisObj.laboCh),0);
-  const tMB = tCA - totalMat;
-  const totalChargesPDV = totalChargesDirectesPDV(moisObj.pdv, data.pdvCats);
-  const tNet = pdvCalc.reduce((s,p)=>s+p.c.res,0) + caEvenementiel;
-
-  return {
-    moisLabel,
-    tCA, tMB, totalMat, tL, totalChargesPDV, tNet, totalCharges,
-    pctMB: tCA>0?(tMB/tCA)*100:0,
-    pctNet: tCA>0?(tNet/tCA)*100:0,
-    groupesCharges, encaissementsParPdv, classementPdv, encaissementsEvent, depensesManuelles, caEvenementiel,
-  };
-}
-
-// Génère le contenu CSV (texte brut, séparateur point-virgule pour Excel FR)
-function genererCsvExport(ex){
-  const lignes = [];
-  const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2});
-  const pct = v => v.toLocaleString("fr-FR",{minimumFractionDigits:1,maximumFractionDigits:1});
-
-  lignes.push(`Rapport mensuel — ${ex.moisLabel}`);
-  lignes.push("");
-  lignes.push("SYNTHÈSE");
-  lignes.push("Indicateur;Montant (€);% du CA");
-  lignes.push(`CA total;${nb(ex.tCA)};100,0`);
-  lignes.push(`Matières premières;${nb(ex.totalMat)};${pct(ex.tCA>0?ex.totalMat/ex.tCA*100:0)}`);
-  lignes.push(`Marge brute;${nb(ex.tMB)};${pct(ex.pctMB)}`);
-  lignes.push(`Charges labo (total);${nb(ex.tL)};${pct(ex.tCA>0?ex.tL/ex.tCA*100:0)}`);
-  lignes.push(`Charges directes PDV;${nb(ex.totalChargesPDV)};${pct(ex.tCA>0?ex.totalChargesPDV/ex.tCA*100:0)}`);
-  lignes.push(`Résultat net;${nb(ex.tNet)};${pct(ex.pctNet)}`);
-  lignes.push("");
-
-  lignes.push("CHARGES DÉTAILLÉES PAR CATÉGORIE COMPTABLE (labo + tous points de vente)");
-  lignes.push("Groupe / Sous-catégorie;Montant (€);% du CA");
-  ex.groupesCharges.forEach(g=>{
-    lignes.push(`${g.groupeLabel};${nb(g.totalGroupe)};${pct(g.pctCA)}`);
-    g.items.forEach(c=>lignes.push(`  ${c.label};${nb(c.montant)};${pct(c.pctCA)}`));
-  });
-  lignes.push(`TOTAL CHARGES;${nb(ex.totalCharges)};${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}`);
-  lignes.push("");
-
-  lignes.push("ENCAISSEMENTS PAR POINT DE VENTE");
-  lignes.push("Point de vente;Total (€);% du CA;Détail par mode");
-  ex.encaissementsParPdv.forEach(e=>{
-    const detail = Object.entries(e.parMode).map(([m,v])=>`${m}: ${nb(v)}€`).join(" | ");
-    lignes.push(`${e.pdv};${nb(e.total)};${pct(e.pctCA)};"${detail}"`);
-  });
-  lignes.push("");
-
-  if(ex.encaissementsEvent.length>0){
-    lignes.push("ENCAISSEMENTS ÉVÉNEMENTIEL");
-    lignes.push("Date;Montant (€);Mode;% du CA");
-    ex.encaissementsEvent.forEach(e=>lignes.push(`${e.date};${nb(e.montant)};${e.mode};${pct(e.pctCA)}`));
-    lignes.push("");
-  }
-
-  if(ex.depensesManuelles.length>0){
-    lignes.push("DÉPENSES MANUELLES (espèces / BL)");
-    lignes.push("Date;Catégorie;Affecté à;Montant (€);Mode;Saisi par;% du CA");
-    ex.depensesManuelles.forEach(d=>lignes.push(`${d.date};${d.categorie};${d.scope};${nb(d.montant)};${d.mode};${d.vendeur};${pct(d.pctCA)}`));
-    lignes.push("");
-  }
-
-  lignes.push("DÉTAIL PAR POINT DE VENTE (classé du plus au moins rentable)");
-  lignes.push("Point de vente;CA (€);Résultat net (€);% net");
-  ex.classementPdv.forEach(p=>lignes.push(`${p.pdv};${nb(p.ca)};${nb(p.resultatNet)};${pct(p.pctNet)}`));
-
-  return lignes.join("\n");
-}
-
-// Génère le PDF via impression navigateur : on ouvre une page HTML mise en
-// forme dans un nouvel onglet, puis on déclenche window.print() — l'utilisateur
-// choisit "Enregistrer en PDF" dans la boîte de dialogue d'impression. Cette
-// approche ne nécessite aucune librairie externe, ce qui la rend fiable sur un
-// déploiement statique GitHub Pages (pas de dépendance à un CDN qui pourrait
-// être indisponible).
-function genererPdfExport(ex){
-  const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
-  const pct = v => v.toLocaleString("fr-FR",{minimumFractionDigits:1,maximumFractionDigits:1})+"%";
-
-  const blocGroupeCharge = g => `
-    <tr class="groupe-row"><td colspan="2">${g.groupeLabel}</td><td class="num">${nb(g.totalGroupe)}</td><td class="num">${pct(g.pctCA)}</td></tr>
-    ${g.items.map(c=>`<tr><td class="indent">${c.label}</td><td></td><td class="num muted">${nb(c.montant)}</td><td class="num muted">${pct(c.pctCA)}</td></tr>`).join("")}
-  `;
-  const lignePdv = e => {
-    const detail = Object.entries(e.parMode).map(([m,v])=>`${m}: ${nb(v)}`).join(" · ");
-    return `<tr><td>${e.pdv}</td><td class="num">${nb(e.total)}</td><td class="num">${pct(e.pctCA)}</td><td class="muted small">${detail}</td></tr>`;
-  };
-  const ligneClassementPdv = (p,i) => `<tr><td>#${i+1}</td><td>${p.pdv}</td><td class="num">${nb(p.ca)}</td><td class="num" style="color:${p.resultatNet>=0?'#2d6a4f':'#c1121f'}">${nb(p.resultatNet)}</td><td class="num">${pct(p.pctNet)}</td></tr>`;
-
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Rapport ${ex.moisLabel}</title>
-<style>
-  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#212529;padding:32px;max-width:900px;margin:0 auto;}
-  h1{font-size:20px;margin-bottom:2px;}
-  h2{font-size:14px;margin:24px 0 8px;padding-bottom:6px;border-bottom:2px solid #2d6a4f;color:#2d6a4f;}
-  table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px;}
-  th{text-align:left;background:#f8f9fa;padding:6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:#6c757d;border-bottom:1px solid #e9ecef;}
-  td{padding:5px 8px;border-bottom:1px solid #f0f0f0;}
-  td.indent{padding-left:20px;}
-  .num{text-align:right;font-weight:600;}
-  .muted{color:#6c757d;font-weight:400;}
-  .small{font-size:10px;}
-  .synthese{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;}
-  .kpi{flex:1;min-width:140px;background:#f8f9fa;border-radius:8px;padding:12px;}
-  .kpi .label{font-size:10px;text-transform:uppercase;color:#6c757d;margin-bottom:4px;}
-  .kpi .val{font-size:18px;font-weight:700;color:#2d6a4f;}
-  .total-row{font-weight:700;background:#f8f9fa;}
-  .groupe-row{font-weight:700;background:#f1f6f3;}
-  .page-break{page-break-before:always;}
-  @media print{ body{padding:0;} }
-</style></head><body>
-  <h1>🫒 Rapport mensuel — ${ex.moisLabel}</h1>
-  <div class="muted small">Généré le ${new Date().toLocaleDateString("fr-FR")} · Page 1/2</div>
-
-  <h2>Synthèse</h2>
-  <div class="synthese">
-    <div class="kpi"><div class="label">CA total</div><div class="val">${nb(ex.tCA)}</div></div>
-    <div class="kpi"><div class="label">Marge brute</div><div class="val">${pct(ex.pctMB)}</div></div>
-    <div class="kpi"><div class="label">Charges labo</div><div class="val">${nb(ex.tL)}</div></div>
-    <div class="kpi"><div class="label">Charges PDV</div><div class="val">${nb(ex.totalChargesPDV)}</div></div>
-    <div class="kpi"><div class="label">Résultat net</div><div class="val" style="color:${ex.tNet>=0?'#2d6a4f':'#c1121f'}">${nb(ex.tNet)} (${pct(ex.pctNet)})</div></div>
-  </div>
-
-  <h2>Charges par catégorie comptable (labo + tous points de vente)</h2>
-  <table>
-    <tr><th>Catégorie / Sous-catégorie</th><th></th><th>Montant</th><th>% du CA</th></tr>
-    ${ex.groupesCharges.map(blocGroupeCharge).join("")}
-    <tr class="total-row"><td colspan="2">TOTAL CHARGES</td><td class="num">${nb(ex.totalCharges)}</td><td class="num">${pct(ex.tCA>0?ex.totalCharges/ex.tCA*100:0)}</td></tr>
-  </table>
-
-  <h2>Encaissements par point de vente</h2>
-  <table>
-    <tr><th>Point de vente</th><th>Total</th><th>% du CA</th><th>Détail par mode</th></tr>
-    ${ex.encaissementsParPdv.map(lignePdv).join("")}
-  </table>
-
-  ${ex.encaissementsEvent.length>0 ? `
-  <h2>Encaissements événementiel</h2>
-  <table>
-    <tr><th>Date</th><th>Montant</th><th>Mode</th><th>% du CA</th></tr>
-    ${ex.encaissementsEvent.map(e=>`<tr><td>${e.date}</td><td class="num">${nb(e.montant)}</td><td>${e.mode}</td><td class="num">${pct(e.pctCA)}</td></tr>`).join("")}
-  </table>` : ""}
-
-  ${ex.depensesManuelles.length>0 ? `
-  <h2>Dépenses manuelles (espèces / BL)</h2>
-  <table>
-    <tr><th>Date</th><th>Catégorie</th><th>Affecté à</th><th>Montant</th><th>Mode</th><th>Saisi par</th></tr>
-    ${ex.depensesManuelles.map(d=>`<tr><td>${d.date}</td><td>${d.categorie}</td><td class="muted">${d.scope}</td><td class="num">${nb(d.montant)}</td><td>${d.mode}</td><td class="muted small">${d.vendeur}</td></tr>`).join("")}
-  </table>` : ""}
-
-  <div class="page-break"></div>
-  <h1>🫒 Détail par point de vente — ${ex.moisLabel}</h1>
-  <div class="muted small">Classé du plus au moins rentable · Page 2/2</div>
-
-  <h2>Classement des points de vente</h2>
-  <table>
-    <tr><th>#</th><th>Point de vente</th><th>CA</th><th>Résultat net</th><th>% net</th></tr>
-    ${ex.classementPdv.map(ligneClassementPdv).join("")}
-  </table>
-
-</body></html>`;
-
-  const w = window.open("", "_blank");
-  if(!w){ alert("Le navigateur a bloqué l'ouverture de la fenêtre d'impression. Autorisez les pop-ups pour ce site puis réessayez."); return; }
-  w.document.write(html);
-  w.document.close();
-  w.onload = ()=>{ w.focus(); w.print(); };
-}
-
-
+// ─── STYLES ───────────────────────────────────────────────────────────────────
 const C={
   bg:"#f8f9fa",white:"#fff",border:"#e9ecef",
   text:"#212529",textMuted:"#6c757d",textLight:"#adb5bd",
@@ -1142,7 +606,6 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const [depForm,setDepForm]=useState({montant:"",modeId:"",scope:"pdv",catId:""});
 
   const [saving,setSaving]=useState(false);
-  const [saveError,setSaveError]=useState(null);
 
   const pdvInfo=PDV_LIST.find(p=>p.id===pdvId);
   const total=modes.reduce((s,m)=>s+n(m.montant),0);
@@ -1178,7 +641,6 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
   const valider=async ()=>{
     setSaving(true);
-    setSaveError(null);
     // Si le vendeur a saisi un montant mais n'a pas cliqué "+ Ajouter", on l'ajoute automatiquement
     let depensesFinales = [...depenses];
     if(n(depForm.montant)>0){
@@ -1193,13 +655,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
     const key=moisKey();
     // Recharger les données fraîches depuis Supabase avant d'écrire
     // pour éviter d'écraser des données plus récentes
-    const { data: remote, error: loadErr } = await loadFromSupabase();
-    if(loadErr){
-      // On continue quand même avec les données locales disponibles plutôt
-      // que de bloquer complètement le vendeur sur le terrain — mais on
-      // l'avertit clairement que la synchronisation a un souci.
-      setSaveError(`Connexion instable (${loadErr}). La clôture va quand même être enregistrée localement.`);
-    }
+    const remote = await loadFromSupabase();
     const baseData = remote || data;
     const d = ensureMois(baseData, key);
     const cloture={
@@ -1243,18 +699,10 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
 
     mois = {...mois, pdv:pdvObj, laboCh};
     const newData={...d, mois:{...d.mois,[key]:mois}};
-    const result = await onSave(newData);
+    onSave(newData);
     setSaving(false);
-    if(result && result.success===false){
-      // La sauvegarde en ligne a échoué : on prévient clairement plutôt que
-      // de laisser croire que tout s'est bien passé. La donnée reste dans le
-      // cache local de cet appareil (saveCache déjà fait dans handleVendeurSave).
-      setSaveError(`⚠️ La clôture n'a pas pu être synchronisée en ligne (${result.error}). Elle reste enregistrée sur cet appareil — ne fermez pas cette page et réessayez dès que la connexion revient (bouton ci-dessous), ou signalez-le au patron.`);
-      return;
-    }
     setStep("confirm");
   };
-  const reessayerValidation = ()=>{ valider(); };
 
   if(step==="confirm") return (
     <div style={{minHeight:"100vh",background:C.primaryLight,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
@@ -1396,14 +844,6 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
           </div>
         </Card>
 
-        {saveError && <Card style={{background:C.redLight,border:`1px solid ${C.red}33`,marginBottom:16}} pad={14}>
-          <div style={{fontSize:13,color:C.red,fontWeight:600,marginBottom:8}}>{saveError}</div>
-          <button onClick={reessayerValidation} disabled={saving}
-            style={{...base,background:C.red,color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:saving?"not-allowed":"pointer"}}>
-            🔄 Réessayer
-          </button>
-        </Card>}
-
         <button onClick={valider} disabled={total===0||saving}
           style={{...base,width:"100%",background:total>0&&!saving?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontWeight:700,fontSize:16,cursor:total>0&&!saving?"pointer":"not-allowed",transition:"background 0.15s"}}>
           {saving?"⏳ Enregistrement...":(()=>{const tot=depenses.length+(n(depForm.montant)>0?1:0);return `Valider la clôture${tot>0?` (+${tot} dépense${tot>1?"s":""})`:""}`;})()}
@@ -1491,181 +931,11 @@ function GestionPaiements({paiements, onChange}){
   </div>;
 }
 
-// ─── MES OBJECTIFS (fourchettes personnalisables de comparaison sectorielle) ──
-// Permet au patron d'ajuster chaque fourchette min/max utilisée dans le bloc
-// "Comparaison avec le secteur" du Dashboard, pour remplacer les repères
-// génériques par sa propre connaissance fine de son métier — particulièrement
-// utile pour les postes où aucune référence sectorielle fiable n'existe pour
-// un modèle de vente directe multi-sites (droits de place, logistique...).
-function GestionObjectifs({objectifs, onChange}){
-  const refsDistantes = objectifs || REFERENCES_SECTORIELLES_DEFAUT;
-  const keys = Object.keys(REFERENCES_SECTORIELLES_DEFAUT);
-
-  // CORRECTIF SAUT DE CURSEUR : la saisie se fait dans un état LOCAL
-  // (localRefs), qui réagit instantanément sans aller-retour réseau. La
-  // sauvegarde vers Supabase (via onChange, qui recharge et écrit en base)
-  // ne se déclenche qu'au blur du champ — pas à chaque frappe — ce qui
-  // évite que React ne perde la position du curseur pendant la saisie.
-  const [localRefs, setLocalRefs] = useState(()=>JSON.parse(JSON.stringify(refsDistantes)));
-
-  // Si les objectifs distants changent pour une autre raison (ex: un autre
-  // appareil a modifié entre-temps), on resynchronise l'état local — mais
-  // seulement quand on n'est pas en train de taper, pour ne pas écraser une
-  // saisie en cours.
-  const [editing, setEditing] = useState(false);
-  useEffect(()=>{
-    if(!editing) setLocalRefs(JSON.parse(JSON.stringify(refsDistantes)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objectifs]);
-
-  const updLocal = (key, field, value) => {
-    setEditing(true);
-    setLocalRefs(prev=>({...prev, [key]: {...prev[key], [field]: value}}));
-  };
-  const commit = (key, field) => {
-    setEditing(false);
-    const raw = localRefs[key]?.[field];
-    const val = raw===""||raw===undefined||raw===null ? 0 : n(raw);
-    const cleaned = {...localRefs, [key]: {...localRefs[key], [field]: val}};
-    setLocalRefs(cleaned);
-    onChange(cleaned);
-  };
-  const reinitialiser = () => {
-    if(window.confirm("Réinitialiser tous les objectifs aux valeurs par défaut ?")) {
-      const fresh = JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT));
-      setLocalRefs(fresh);
-      onChange(fresh);
-    }
-  };
-
-  return <div>
-    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
-      <div style={{fontSize:12,color:C.textMuted}}>
-        Ces fourchettes servent de repère dans le bloc "📐 Comparaison avec le secteur" du Dashboard. Ajustez-les selon votre propre connaissance de votre activité — les valeurs par défaut sont des repères génériques de restauration avec production propre, qui ne collent pas forcément à votre modèle multi-sites (marchés + boutiques).
-      </div>
-    </Card>
-
-    <SectionHead action={<button onClick={reinitialiser} style={{...base,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer",color:C.textMuted}}>↺ Réinitialiser</button>}>Vos objectifs par poste</SectionHead>
-
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {keys.map(key=>{
-        const ref = localRefs[key] || REFERENCES_SECTORIELLES_DEFAUT[key];
-        const isMargeNette = key==="margeNette";
-        return <Card key={key} pad={16}>
-          <div style={{fontWeight:600,fontSize:14,marginBottom:4}}>{ref.label}</div>
-          <div style={{fontSize:11,color:C.textLight,marginBottom:12}}>{ref.note}</div>
-          <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
-            <div style={{flex:1,minWidth:100}}>
-              <Label>{isMargeNette?"Minimum acceptable (%)":"Minimum (%)"}</Label>
-              <div style={{position:"relative"}}>
-                <input type="number" min="0" step="0.5" value={ref.min}
-                  onChange={e=>updLocal(key,"min",e.target.value)}
-                  onBlur={()=>commit(key,"min")}
-                  onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
-                  style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
-                <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
-              </div>
-            </div>
-            <div style={{flex:1,minWidth:100}}>
-              <Label>{isMargeNette?"Objectif ambitieux (%)":"Maximum (%)"}</Label>
-              <div style={{position:"relative"}}>
-                <input type="number" min="0" step="0.5" value={ref.max}
-                  onChange={e=>updLocal(key,"max",e.target.value)}
-                  onBlur={()=>commit(key,"max")}
-                  onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
-                  style={{...base,width:"100%",padding:"9px 24px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
-                <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>%</span>
-              </div>
-            </div>
-          </div>
-        </Card>;
-      })}
-    </div>
-    <div style={{fontSize:11,color:C.textLight,marginTop:12,textAlign:"center"}}>
-      💾 Les modifications sont enregistrées automatiquement quand vous quittez un champ (ou appuyez sur Entrée).
-    </div>
-  </div>;
-}
-
-// ─── EXPORT MENSUEL (onglet dédié) ────────────────────────────────────────────
-// Permet de choisir un mois (le mois en cours ou un mois passé disponible) et
-// d'exporter en CSV ou PDF toutes les charges/encaissements/dépenses du mois,
-// détaillés par sous-catégorie, avec leur % du CA — pour analyse approfondie
-// des postes où des économies sont possibles.
-function PanneauExport({data}){
-  const moisDisponibles = Object.keys(data.mois).sort().reverse();
-  const [moisChoisi, setMoisChoisi] = useState(data.active);
-  const [generating, setGenerating] = useState(false);
-
-  const moisLabel = (key) => {
-    const [a,m] = key.split("-").map(Number);
-    return `${MOIS[m]} ${a}`;
-  };
-
-  const lancerExport = (format) => {
-    setGenerating(true);
-    try{
-      const moisObj = fillPdvKeys(data.mois[moisChoisi] || initMois());
-      const ex = assemblerDonneesExport(data, moisObj, moisLabel(moisChoisi));
-      if(format==="csv"){
-        const csv = genererCsvExport(ex);
-        const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `rapport_${moisChoisi}.csv`;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      } else {
-        genererPdfExport(ex);
-      }
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const isMoisEnCours = moisChoisi === moisKey();
-
-  return <div>
-    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
-      <div style={{fontSize:12,color:C.textMuted}}>
-        Exportez toutes les charges, encaissements et dépenses du mois choisi, détaillés par sous-catégorie avec leur % du chiffre d'affaires — pour analyser en détail où se trouvent les postes à optimiser.
-      </div>
-    </Card>
-
-    <Card style={{marginBottom:16}}>
-      <SectionHead>Période</SectionHead>
-      <select value={moisChoisi} onChange={e=>setMoisChoisi(e.target.value)}
-        style={{...base,width:"100%",padding:"10px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:14,marginBottom:8}}>
-        {moisDisponibles.map(k=><option key={k} value={k}>{moisLabel(k)}</option>)}
-      </select>
-      {isMoisEnCours && <div style={{fontSize:11,color:C.textMuted}}>ℹ️ Ce mois est en cours — l'export reflétera les données saisies jusqu'à aujourd'hui.</div>}
-    </Card>
-
-    <Card>
-      <SectionHead>Format d'export</SectionHead>
-      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-        <button onClick={()=>lancerExport("pdf")} disabled={generating}
-          style={{...base,flex:1,minWidth:140,background:generating?"#ccc":C.primary,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:14,cursor:generating?"not-allowed":"pointer"}}>
-          📄 Export PDF
-        </button>
-        <button onClick={()=>lancerExport("csv")} disabled={generating}
-          style={{...base,flex:1,minWidth:140,background:generating?"#ccc":C.fixe,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontWeight:700,fontSize:14,cursor:generating?"not-allowed":"pointer"}}>
-          📊 Export CSV (Excel)
-        </button>
-      </div>
-      <div style={{fontSize:11,color:C.textLight,marginTop:10}}>
-        Le PDF s'ouvre dans un nouvel onglet avec la boîte de dialogue d'impression — choisissez "Enregistrer en PDF" comme destination. Le CSV se télécharge directement, à ouvrir avec Excel ou Google Sheets.
-      </div>
-    </Card>
-  </div>;
-}
-
 // ─── IMPORT CSV ───────────────────────────────────────────────────────────────
 function ImportCSV({data, md, onApplied}){
   const [text,setText]=useState("");
   const [rows,setRows]=useState(null); // résultat parsing
-  const [duplicateHashes,setDuplicateHashes]=useState(new Map());
+  const [duplicateHashes,setDuplicateHashes]=useState(new Set());
   const [checkingDup,setCheckingDup]=useState(false);
   const [forceInclude,setForceInclude]=useState({}); // {rowId:true} pour inclure malgré le doublon
   const [rules,setRules]=useState({});
@@ -1707,12 +977,10 @@ function ImportCSV({data, md, onApplied}){
     let auto=null;
 
     if(k.isRemCB){
+      // Encaissement CB : déjà compté dans le CA via les clôtures des vendeurs.
       auto = { type:"ignore", reason:"Encaissement CB — déjà couvert par les clôtures de caisse" };
-    } else if(k.isSumUp && row.credit>0){
-      auto = { type:"ignore", reason:"Versement SumUp — déjà couvert par les clôtures de caisse" };
-    } else if(k.isDepotEspeces && row.credit>0){
-      auto = { type:"ignore", reason:"Dépôt d'espèces — déjà couvert par les clôtures de caisse" };
     } else if(k.isComCB){
+      // Commission CB : traitée à part, répartie au prorata du CB encaissé par point de vente.
       auto = { type:"com_cb" };
     } else {
       const rule = findRuleMatch(k.clean, rules);
@@ -1730,12 +998,6 @@ function ImportCSV({data, md, onApplied}){
   const comCbLines = classified.filter(c=>c.auto && c.auto.type==="com_cb");
   const totalComCB = comCbLines.reduce((s,c)=>s+c.row.debit,0);
   const credits = classified.filter(c=>!c.auto && c.row.credit>0);
-
-  // Rapprochement bancaire : calculé sur TOUTES les lignes lues du fichier
-  // (rows, pas effectiveRows) pour pouvoir détecter la frontière du
-  // chevauchement avec un import précédent, en tenant compte des choix de
-  // classement en cours (pending).
-  const rapprochement = rows ? calculerRapprochement(rows, duplicateHashes, pending) : null;
 
   // Trouve l'id du mode de paiement "carte bancaire" parmi les modes configurés
   const cbModeId = (()=>{
@@ -1764,6 +1026,7 @@ function ImportCSV({data, md, onApplied}){
       const choix=pending[c.row.id];
       if(!choix || choix.type==="ignore") continue;
       if(choix.type==="multi"){
+        // Répartition multi-PDV : une op par point de vente avec son montant spécifique
         (choix.repartition||[]).forEach(r=>{
           if(n(r.montant)>0){
             const cats=data.pdvCats[r.pdvId]||[];
@@ -1791,15 +1054,8 @@ function ImportCSV({data, md, onApplied}){
     }
 
     // 2. Appliquer chaque opération aux bons mois (avec lissage)
-    // CORRECTIF ANTI-ÉCRASEMENT : on repart des données fraîches de Supabase
-    // plutôt que de `md`/`data` (potentiellement périmés si quelqu'un d'autre
-    // a écrit pendant que le patron classait les lignes du CSV).
-    const { data: remoteForImport, error: loadErrImport } = await loadFromSupabase();
-    if(loadErrImport) console.error("Rechargement avant import CSV échoué, utilisation des données locales:", loadErrImport);
-    const freshDataForImport = remoteForImport ? migrateLaboCats(remoteForImport) : data;
-    const startKey = freshDataForImport.active;
-    const freshMdForImport = fillPdvKeys(freshDataForImport.mois[startKey] || initMois());
-    const moisCache = { [startKey]: freshMdForImport }; // on ne modifie que le mois actif + futurs si lissage
+    const moisCache = { [data.active]: md }; // on ne modifie que le mois actif + futurs si lissage
+    const startKey = data.active;
 
     for(const op of ops){
       const nbMois = op.lissage==="trimestriel"?3 : op.lissage==="annuel"?12 : op.lissage==="personnalise"?(op.nbMois||1) : 1;
@@ -1807,6 +1063,7 @@ function ImportCSV({data, md, onApplied}){
       const keys = moisLissage(startKey, nbMois);
       for(const k of keys){
         if(!moisCache[k]){
+          // mois futur pas encore en cache : on part d'un mois vide compatible
           moisCache[k] = initMois();
         }
         if(op.type==="labo"){
@@ -1821,13 +1078,14 @@ function ImportCSV({data, md, onApplied}){
           moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, evenementiel: {ca:(n(ev.ca)+part)}}};
         }
       }
+      // Mémoriser la règle apprise (pas pour les commissions CB, recalculées chaque fois)
       if(op._learnKeyword){
         await saveImportRule(op._learnKeyword, { type:op.type, pdvId:op.pdvId, catId:op.catId, label:op.label, lissage:op.lissage||"ponctuel", nbMois:op.nbMois });
       }
     }
 
     // 3. S'assurer que la catégorie "frais_cb" existe dans chaque pdvCats concerné
-    let newPdvCats = {...freshDataForImport.pdvCats};
+    let newPdvCats = {...data.pdvCats};
     const pdvIdsUsed = new Set(ops.filter(o=>o.type==="pdv"&&o.catId==="frais_cb").map(o=>o.pdvId));
     pdvIdsUsed.forEach(pid=>{
       const cats=newPdvCats[pid]||[];
@@ -1836,32 +1094,11 @@ function ImportCSV({data, md, onApplied}){
       }
     });
 
-    // 4bis. Enregistrer le résultat du rapprochement bancaire de cet import
-    // (Vérification A uniquement — objective, indépendante du classement)
-    // dans un petit journal consultable ensuite dans l'onglet dédié.
-    if(rapprochement && rapprochement.verifSolde.possible){
-      const entry = {
-        id: uid(),
-        date: todayKey(),
-        dateLabel: new Date().toLocaleDateString("fr-FR"),
-        coherent: rapprochement.verifSolde.coherent,
-        ecart: rapprochement.verifSolde.ecart,
-        soldeTheorique: rapprochement.verifSolde.soldeTheorique,
-        soldeAnnonce: rapprochement.verifSolde.soldeAnnonce,
-        chevauchementDetecte: rapprochement.verifSolde.chevauchementDetecte,
-        nbLignesExclues: rapprochement.verifSolde.nbLignesExclues,
-        nbLignes: effectiveRows.length,
-        nbCreditsInhabituels: rapprochement.creditsInhabituelsNonClasses.length,
-      };
-      const startMois = moisCache[startKey];
-      moisCache[startKey] = {...startMois, pdv:{...startMois.pdv, _rapprochements:[...(startMois.pdv._rapprochements||[]), entry]}};
-    }
-
     // 4. Sauvegarder tous les mois touchés + pdvCats si modifiés
     for(const [key,moisObj] of Object.entries(moisCache)){
       await saveMoisToSupabase(key, moisObj);
     }
-    const newData = {...freshDataForImport, pdvCats:newPdvCats};
+    const newData = {...data, pdvCats:newPdvCats};
     await saveAppDataToSupabase(newData);
 
     // 5. Mémoriser l'empreinte de toutes les lignes de ce relevé pour détecter les doublons futurs
@@ -1932,41 +1169,6 @@ function ImportCSV({data, md, onApplied}){
       </div>
     </Card>
 
-    {/* Rapprochement bancaire — Vérification A (solde) + B (exhaustivité) */}
-    {rapprochement && <Card style={{marginBottom:16, background: rapprochement.verifSolde.possible ? (rapprochement.verifSolde.coherent?C.greenLight:C.redLight) : C.bg, border: rapprochement.verifSolde.possible ? `1px solid ${rapprochement.verifSolde.coherent?C.green:C.red}33` : `1px solid ${C.border}`}}>
-      <SectionHead>🔍 Rapprochement bancaire</SectionHead>
-      {rapprochement.verifSolde.possible ? (
-        rapprochement.verifSolde.coherent ? (
-          <div>
-            <div style={{fontSize:13,color:C.green,fontWeight:600}}>✅ Solde cohérent avec le relevé — le fichier a été lu en entier, sans écart.</div>
-            {rapprochement.verifSolde.chevauchementDetecte && <div style={{fontSize:11,color:C.textMuted,marginTop:4}}>
-              ℹ️ Chevauchement avec un import précédent détecté et pris en compte automatiquement ({rapprochement.verifSolde.nbLignesExclues} ligne(s) déjà connue(s) exclues du calcul).
-            </div>}
-          </div>
-        ) : (
-          <div>
-            <div style={{fontSize:13,color:C.red,fontWeight:700,marginBottom:6}}>⚠️ Écart de {rapprochement.verifSolde.ecart.toLocaleString("fr-FR")} € détecté avec le solde du relevé.</div>
-            <div style={{fontSize:12,color:C.textMuted,marginBottom:8}}>
-              Solde théorique calculé : {rapprochement.verifSolde.soldeTheorique.toLocaleString("fr-FR")} € · Solde annoncé par la banque : {rapprochement.verifSolde.soldeAnnonce.toLocaleString("fr-FR")} €.
-              {rapprochement.verifSolde.chevauchementDetecte && ` (${rapprochement.verifSolde.nbLignesExclues} ligne(s) de chevauchement déjà exclues du calcul.)`}
-            </div>
-            <div style={{fontSize:11,color:C.textMuted,background:C.white,borderRadius:8,padding:"8px 10px"}}>
-              <strong>Que faire ?</strong> Cet écart ne dépend pas de la façon dont vous classez vos dépenses — il indique un souci avec le fichier lui-même. Vérifiez dans l'ordre :
-              <br/>1. Que la période exportée depuis CIC ne laisse aucun trou avec le précédent import.
-              <br/>2. Que le fichier n'a pas été coupé ou tronqué à l'export.
-              <br/>3. Si le doute persiste, ré-exportez un CSV frais et réimportez-le (les doublons seront automatiquement exclus).
-            </div>
-          </div>
-        )
-      ) : (
-        <div style={{fontSize:12,color:C.textMuted}}>ℹ️ Ce relevé ne contient pas de colonne Solde exploitable — vérification du solde non disponible pour cet import.</div>
-      )}
-      {rapprochement.creditsInhabituelsNonClasses.length>0 && <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
-        <div style={{fontSize:12,fontWeight:600,color:C.accent}}>⚠️ {rapprochement.creditsInhabituelsNonClasses.length} encaissement(s) inhabituel(s) à vérifier</div>
-        <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>Ni un règlement CB/SumUp ni un dépôt d'espèces — probablement un remboursement fournisseur ou similaire. Classez-les ci-dessous dans "💰 Encaissements à classer".</div>
-      </div>}
-    </Card>}
-
     {reconnues.length>0 && <Card style={{marginBottom:16}}>
       <SectionHead>🟢 Classées automatiquement</SectionHead>
       <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:240,overflowY:"auto"}}>
@@ -1995,6 +1197,7 @@ function ImportCSV({data, md, onApplied}){
                   if(v==="ignore") setPend(c.row.id,{type:"ignore"});
                   else if(v==="labo") setPend(c.row.id,{type:"labo",catId:allCatsLabo[0]?.id,label:allCatsLabo[0]?.label,lissage:"ponctuel"});
                   else if(v==="multi"){
+                    // Initialise avec tous les PDV à 0
                     const repartition=PDV_LIST.map(p=>({pdvId:p.id,montant:"",catId:(data.pdvCats[p.id]||[])[0]?.id}));
                     setPend(c.row.id,{type:"multi",repartition,lissage:"ponctuel"});
                   }
@@ -2139,49 +1342,42 @@ function PanneauDepenses({data, md, onUpdateMois}){
   const catsDisponibles = form.scope==="labo" ? data.laboCats : (data.pdvCats[form.pdvId]||[]);
   const reclassCats = reclassant ? (reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[])) : [];
 
-  // CORRECTIF ANTI-ÉCRASEMENT : chaque mutation part désormais d'un mutateur
-  // fonctionnel appliqué par onUpdateMois (= upd) sur le mois FRAIS rechargé
-  // depuis Supabase, jamais sur `md` capturé au moment du rendu.
   const ajouter = ()=>{
     if(!n(form.montant)) return;
     const cat = catsDisponibles.find(c=>c.id===form.catId) || catsDisponibles[0];
     const mode = data.paiements.find(p=>p.id===form.modeId);
     const pdvInfo = PDV_LIST.find(p=>p.id===form.pdvId);
     const montant = n(form.montant);
-    onUpdateMois(freshMois=>{
-      let laboCh = {...freshMois.laboCh};
-      let pdvObj = {...freshMois.pdv};
-      if(form.scope==="labo"){
-        laboCh[cat.id] = n(laboCh[cat.id]) + montant;
-      } else {
-        const pm = pdvObj[form.pdvId];
-        pdvObj = {...pdvObj, [form.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+montant)}}};
-      }
-      const log = {
-        id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
-        vendeurNom:"Patron (saisie manuelle)", pdvId:form.scope==="pdv"?form.pdvId:null,
-        pdvLabel:form.scope==="pdv"?pdvInfo?.full:null,
-        montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
-      };
-      pdvObj = {...pdvObj, _depenses:[...(freshMois.pdv._depenses||[]), log]};
-      return {...freshMois, laboCh, pdv:pdvObj};
-    });
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(form.scope==="labo"){
+      laboCh[cat.id] = n(laboCh[cat.id]) + montant;
+    } else {
+      const pm = pdvObj[form.pdvId];
+      pdvObj = {...pdvObj, [form.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+montant)}}};
+    }
+    const log = {
+      id:uid(), date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
+      vendeurNom:"Patron (saisie manuelle)", pdvId:form.scope==="pdv"?form.pdvId:null,
+      pdvLabel:form.scope==="pdv"?pdvInfo?.full:null,
+      montant, modeLabel:mode?.label||"—", scope:form.scope, catLabel:cat?.label||"Autre", catId:cat?.id
+    };
+    pdvObj = {...pdvObj, _depenses:[...(md.pdv._depenses||[]), log]};
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
     setForm({...form, montant:""});
   };
 
   const supprimer = (dep)=>{
-    onUpdateMois(freshMois=>{
-      let laboCh = {...freshMois.laboCh};
-      let pdvObj = {...freshMois.pdv};
-      if(dep.scope==="labo"){
-        laboCh[dep.catId] = Math.max(0, n(laboCh[dep.catId]) - dep.montant);
-      } else {
-        const pm = pdvObj[dep.pdvId];
-        if(pm) pdvObj = {...pdvObj, [dep.pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:Math.max(0,n(pm.vars?.[dep.catId])-dep.montant)}}};
-      }
-      pdvObj = {...pdvObj, _depenses:(freshMois.pdv._depenses||[]).filter(d=>d.id!==dep.id)};
-      return {...freshMois, laboCh, pdv:pdvObj};
-    });
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(dep.scope==="labo"){
+      laboCh[dep.catId] = Math.max(0, n(laboCh[dep.catId]) - dep.montant);
+    } else {
+      const pm = pdvObj[dep.pdvId];
+      if(pm) pdvObj = {...pdvObj, [dep.pdvId]: {...pm, vars:{...pm.vars, [dep.catId]:Math.max(0,n(pm.vars?.[dep.catId])-dep.montant)}}};
+    }
+    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).filter(d=>d.id!==dep.id)};
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
   };
 
   const sauvegarderReclassement = ()=>{
@@ -2189,30 +1385,28 @@ function PanneauDepenses({data, md, onUpdateMois}){
     const cats = reclassForm.scope==="labo" ? data.laboCats : (data.pdvCats[reclassForm.pdvId]||[]);
     const cat = cats.find(c=>c.id===reclassForm.catId) || cats[0];
     const pdvInfo = PDV_LIST.find(p=>p.id===reclassForm.pdvId);
-    onUpdateMois(freshMois=>{
-      // 1. Retirer l'ancien montant
-      let laboCh = {...freshMois.laboCh};
-      let pdvObj = {...freshMois.pdv};
-      if(reclassant.scope==="labo"){
-        laboCh[reclassant.catId] = Math.max(0, n(laboCh[reclassant.catId]) - reclassant.montant);
-      } else if(reclassant.pdvId){
-        const pm = pdvObj[reclassant.pdvId];
-        if(pm) pdvObj = {...pdvObj, [reclassant.pdvId]: {...pm, vars:{...pm.vars, [reclassant.catId]:Math.max(0,n(pm.vars?.[reclassant.catId])-reclassant.montant)}}};
-      }
-      // 2. Ajouter dans la nouvelle catégorie
-      if(reclassForm.scope==="labo"){
-        laboCh[cat.id] = n(laboCh[cat.id]) + reclassant.montant;
-      } else {
-        const pm = pdvObj[reclassForm.pdvId];
-        pdvObj = {...pdvObj, [reclassForm.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+reclassant.montant)}}};
-      }
-      // 3. Mettre à jour le log
-      const newLog = {...reclassant, scope:reclassForm.scope, catId:cat.id, catLabel:cat.label,
-        pdvId:reclassForm.scope==="pdv"?reclassForm.pdvId:null,
-        pdvLabel:reclassForm.scope==="pdv"?pdvInfo?.full:null};
-      pdvObj = {...pdvObj, _depenses:(freshMois.pdv._depenses||[]).map(d=>d.id===reclassant.id?newLog:d)};
-      return {...freshMois, laboCh, pdv:pdvObj};
-    });
+    // 1. Retirer l'ancien montant
+    let laboCh = {...md.laboCh};
+    let pdvObj = {...md.pdv};
+    if(reclassant.scope==="labo"){
+      laboCh[reclassant.catId] = Math.max(0, n(laboCh[reclassant.catId]) - reclassant.montant);
+    } else if(reclassant.pdvId){
+      const pm = pdvObj[reclassant.pdvId];
+      if(pm) pdvObj = {...pdvObj, [reclassant.pdvId]: {...pm, vars:{...pm.vars, [reclassant.catId]:Math.max(0,n(pm.vars?.[reclassant.catId])-reclassant.montant)}}};
+    }
+    // 2. Ajouter dans la nouvelle catégorie
+    if(reclassForm.scope==="labo"){
+      laboCh[cat.id] = n(laboCh[cat.id]) + reclassant.montant;
+    } else {
+      const pm = pdvObj[reclassForm.pdvId];
+      pdvObj = {...pdvObj, [reclassForm.pdvId]: {...pm, vars:{...pm.vars, [cat.id]:(n(pm.vars?.[cat.id])+reclassant.montant)}}};
+    }
+    // 3. Mettre à jour le log
+    const newLog = {...reclassant, scope:reclassForm.scope, catId:cat.id, catLabel:cat.label,
+      pdvId:reclassForm.scope==="pdv"?reclassForm.pdvId:null,
+      pdvLabel:reclassForm.scope==="pdv"?pdvInfo?.full:null};
+    pdvObj = {...pdvObj, _depenses:(md.pdv._depenses||[]).map(d=>d.id===reclassant.id?newLog:d)};
+    onUpdateMois({...md, laboCh, pdv:pdvObj});
     setReclassant(null);
   };
 
@@ -2335,56 +1529,6 @@ function PanneauDepenses({data, md, onUpdateMois}){
 }
 
 // ─── HISTORIQUE DES CLÔTURES + RÉCAP MODES DE PAIEMENT ───────────────────────
-// ─── RAPPROCHEMENT BANCAIRE (onglet dédié) ────────────────────────────────────
-// Vue consultable à tout moment (indépendamment du moment de l'import) de
-// l'état de cohérence du mois affiché : historique des vérifications de solde
-// faites à chaque import CSV de ce mois.
-function PanneauRapprochement({moisData}){
-  const historique = [...(moisData.pdv._rapprochements||[])].reverse();
-  const dernier = historique[0];
-
-  return <div>
-    <Card style={{marginBottom:20, background: dernier ? (dernier.coherent?C.greenLight:C.redLight) : C.bg, border: dernier ? `1px solid ${dernier.coherent?C.green:C.red}33` : `1px solid ${C.border}`}} pad={20}>
-      <div style={{fontSize:11,fontWeight:600,color:C.textMuted,letterSpacing:0.8,textTransform:"uppercase",marginBottom:8}}>État actuel du mois</div>
-      {!dernier ? (
-        <div style={{fontSize:14,color:C.textMuted}}>Aucun import CSV avec vérification de solde n'a encore été fait ce mois-ci.</div>
-      ) : dernier.coherent ? (
-        <div>
-          <div style={{fontSize:20,fontWeight:800,color:C.green,marginBottom:4}}>✅ Solde cohérent</div>
-          <div style={{fontSize:12,color:C.textMuted}}>Dernière vérification le {dernier.dateLabel} — {dernier.nbLignes} lignes lues, aucun écart avec le relevé bancaire.</div>
-        </div>
-      ) : (
-        <div>
-          <div style={{fontSize:20,fontWeight:800,color:C.red,marginBottom:4}}>⚠️ Écart de {dernier.ecart.toLocaleString("fr-FR")} €</div>
-          <div style={{fontSize:12,color:C.textMuted}}>Détecté le {dernier.dateLabel} — vérifiez que le dernier fichier importé couvre bien toute la période sans coupure.</div>
-        </div>
-      )}
-      {dernier && dernier.nbCreditsInhabituels>0 && <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`,fontSize:12,color:C.accent,fontWeight:600}}>
-        ⚠️ {dernier.nbCreditsInhabituels} encaissement(s) inhabituel(s) restaient à vérifier lors du dernier import — pensez à les classer dans l'onglet Import CSV si ce n'est pas déjà fait.
-      </div>}
-    </Card>
-
-    <SectionHead>Historique des vérifications ({historique.length})</SectionHead>
-    {historique.length===0 && <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucun historique pour ce mois</div></Card>}
-    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      {historique.map(h=>(
-        <Card key={h.id} pad={14}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-            <div>
-              <div style={{fontWeight:600,fontSize:13}}>{h.coherent?"✅ Solde cohérent":`⚠️ Écart de ${h.ecart.toLocaleString("fr-FR")} €`}</div>
-              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{h.dateLabel} · {h.nbLignes} lignes{h.nbCreditsInhabituels>0?` · ${h.nbCreditsInhabituels} encaissement(s) inhabituel(s)`:""}</div>
-            </div>
-            <div style={{fontSize:11,color:C.textLight,textAlign:"right"}}>
-              Théorique : {h.soldeTheorique.toLocaleString("fr-FR")} €<br/>
-              Relevé : {h.soldeAnnonce.toLocaleString("fr-FR")} €
-            </div>
-          </div>
-        </Card>
-      ))}
-    </div>
-  </div>;
-}
-
 function AllClotures({moisData, onUpdateMois}){
   const [filtreDate,setFiltreDate]=useState("");
   const [editing,setEditing]=useState(null); // clôture en cours de modification
@@ -2421,31 +1565,25 @@ function AllClotures({moisData, onUpdateMois}){
   };
 
   // Sauvegarder la clôture modifiée
-  // CORRECTIF ANTI-ÉCRASEMENT : mutateur fonctionnel appliqué sur le mois
-  // frais rechargé par onUpdateMois, pas sur moisData capturé au rendu.
   const sauvegarderEdition=()=>{
     const newTotal = editModes.reduce((s,m)=>s+n(m.montant),0);
     const updatedCloture = {...editing, modes:editModes, note:editNote, total:newTotal};
     const pdvId = editing.pdvId;
-    onUpdateMois(freshMois=>{
-      const pdvMois = freshMois.pdv[pdvId];
-      const newClotures = (pdvMois.clotures||[]).map(c=>c.id===editing.id?updatedCloture:c);
-      const newCa = caDepuisClotures(newClotures);
-      const newPdv = {...freshMois.pdv, [pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
-      return {...freshMois, pdv:newPdv};
-    });
+    const pdvMois = moisData.pdv[pdvId];
+    const newClotures = (pdvMois.clotures||[]).map(c=>c.id===editing.id?updatedCloture:c);
+    const newCa = caDepuisClotures(newClotures);
+    const newPdv = {...moisData.pdv, [pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+    onUpdateMois({...moisData, pdv:newPdv});
     setEditing(null);
   };
 
   // Supprimer une clôture
   const supprimerCloture=(c)=>{
-    onUpdateMois(freshMois=>{
-      const pdvMois = freshMois.pdv[c.pdvId];
-      const newClotures = (pdvMois.clotures||[]).filter(x=>x.id!==c.id);
-      const newCa = caDepuisClotures(newClotures);
-      const newPdv = {...freshMois.pdv, [c.pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
-      return {...freshMois, pdv:newPdv};
-    });
+    const pdvMois = moisData.pdv[c.pdvId];
+    const newClotures = (pdvMois.clotures||[]).filter(x=>x.id!==c.id);
+    const newCa = caDepuisClotures(newClotures);
+    const newPdv = {...moisData.pdv, [c.pdvId]:{...pdvMois, clotures:newClotures, ca:newCa}};
+    onUpdateMois({...moisData, pdv:newPdv});
   };
 
   return <div>
@@ -2698,145 +1836,10 @@ function PanneauPDV({pdvMois,onPdvChange,pdvCats,onPdvCatChange,tLabo,info,pct})
   </div>;
 }
 
-// ─── CASCADE RÉSULTAT (CA → Marge brute → Résultat net) ──────────────────────
-// Vue compacte, sans jargon, qui montre le chemin entre le CA et le résultat
-// net : où l'argent part, étape par étape. Objectif : qu'un chef d'entreprise
-// comprenne en 5 secondes d'où vient un résultat net éloigné du CA, sans
-// avoir à ouvrir chaque point de vente un par un.
-function CascadeResultat({tCA, totalMat, tMB, autresChargesLabo, totalChargesPDV, tNet}){
-  const rows = [
-    { label:"CA total", val:tCA, kind:"start" },
-    { label:"− Matières premières", val:-totalMat, kind:"neg" },
-    { label:"= Marge brute", val:tMB, kind:"subtotal" },
-    { label:"− Autres charges labo (loyers, salaires, assurances...)", val:-autresChargesLabo, kind:"neg" },
-    { label:"− Charges directes des points de vente", val:-totalChargesPDV, kind:"neg" },
-    { label:"= Résultat net", val:tNet, kind:"total" },
-  ];
-  const maxAbs = Math.max(...rows.map(r=>Math.abs(r.val)), 1);
-  return <Card style={{marginBottom:20}}>
-    <SectionHead>🧭 D'où vient ce résultat ?</SectionHead>
-    <div style={{display:"flex",flexDirection:"column",gap:2}}>
-      {rows.map((r,i)=>{
-        const isBold = r.kind==="subtotal"||r.kind==="total"||r.kind==="start";
-        const color = r.kind==="neg" ? C.red : (r.val>=0?C.primary:C.red);
-        const barPct = Math.min(100, Math.abs(r.val)/maxAbs*100);
-        return <div key={i} style={{padding:"8px 0",borderTop:r.kind==="subtotal"||r.kind==="total"?`1.5px solid ${C.border}`:"none"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-            <span style={{fontSize:13,fontWeight:isBold?700:400,color:isBold?C.text:C.textMuted}}>{r.label}</span>
-            <span style={{fontSize:isBold?15:13,fontWeight:isBold?700:600,color}}>
-              {r.val>=0&&r.kind!=="neg"?"":r.val<0?"":"+"}{r.val.toLocaleString("fr-FR",{maximumFractionDigits:0})} €
-            </span>
-          </div>
-          <div style={{background:C.bg,borderRadius:3,height:5,overflow:"hidden"}}>
-            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:r.kind==="neg"?C.accent:(r.val>=0?C.primaryMuted:C.red),transition:"width 0.5s"}}/>
-          </div>
-        </div>;
-      })}
-    </div>
-  </Card>;
-}
-
-// ─── TOP CHARGES (identification des postes dominants pour agir dessus) ──────
-// Classement des plus grosses charges du mois, tous PDV + labo confondus,
-// avec comparaison à la moyenne des 3 mois précédents pour repérer d'un coup
-// d'œil un poste qui dérive (ex: loyer trimestriel mal lissé, dépense
-// dupliquée...). C'est le cœur de l'outil de pilotage : voir vite où va
-// l'argent pour pouvoir agir dessus.
-function TopChargesPanel({rows, tCA}){
-  if(rows.length===0) return null;
-  const maxMontant = Math.max(...rows.map(r=>r.montant), 1);
-  return <Card style={{marginBottom:20}}>
-    <SectionHead>🔎 Top charges du mois</SectionHead>
-    <div style={{fontSize:11,color:C.textMuted,marginBottom:14}}>
-      Les postes qui pèsent le plus ce mois-ci, comparés à leur moyenne des 3 derniers mois. 🔴 = poste en forte hausse (+50% ou plus) à vérifier en priorité.
-    </div>
-    <div style={{display:"flex",flexDirection:"column",gap:10}}>
-      {rows.map(r=>{
-        const barPct = Math.min(100, r.montant/maxMontant*100);
-        const pctCA = tCA>0 ? r.montant/tCA*100 : 0;
-        return <div key={r.key}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-              {r.isAnomalie && <span title="Forte hausse vs les 3 derniers mois" style={{fontSize:13,flexShrink:0}}>🔴</span>}
-              <span style={{fontSize:13,fontWeight:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</span>
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-              {r.ecartPct!==null && <span style={{fontSize:11,fontWeight:600,color:r.isAnomalie?C.red:(r.ecartPct<0?C.green:C.textLight)}}>
-                {r.ecartPct>0?"+":""}{r.ecartPct.toFixed(0)}%
-              </span>}
-              <span style={{fontSize:13,fontWeight:700,color:C.text,minWidth:80,textAlign:"right"}}>{r.montant.toLocaleString("fr-FR",{maximumFractionDigits:0})} €</span>
-            </div>
-          </div>
-          <div style={{background:C.bg,borderRadius:3,height:6,overflow:"hidden"}}>
-            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:r.isAnomalie?C.red:C.primaryMuted,transition:"width 0.5s"}}/>
-          </div>
-          <div style={{fontSize:10,color:C.textLight,marginTop:2}}>{pctCA.toFixed(1)}% du CA total</div>
-        </div>;
-      })}
-    </div>
-  </Card>;
-}
-
-// ─── COMPARAISON SECTORIELLE (repères du métier) ──────────────────────────────
-// Situe chaque grand poste de charge (en % du CA) par rapport aux fourchettes
-// habituellement observées dans la restauration/traiteur événementiel en
-// France. Objectif : repérer d'un coup d'œil les postes qui méritent d'être
-// creusés en priorité pour gagner en rentabilité.
-function ComparaisonSectoriellePanel({rows, margeNettePct, objectifs}){
-  if(rows.length===0) return null;
-  const statutColor = { bon:C.green, attention:C.warn, alerte:C.red };
-  const statutBg = { bon:C.greenLight, attention:C.warnLight, alerte:C.redLight };
-  const statutIcon = { bon:"✅", attention:"⚠️", alerte:"🔴" };
-
-  const margeRef = (objectifs||REFERENCES_SECTORIELLES_DEFAUT).margeNette;
-  const margeStatut = margeNettePct>=margeRef.min ? "bon" : (margeNettePct>=margeRef.min*0.7 ? "attention" : "alerte");
-
-  return <Card style={{marginBottom:20}}>
-    <SectionHead>📐 Comparaison avec le secteur</SectionHead>
-    <div style={{fontSize:11,color:C.textMuted,marginBottom:14}}>
-      Vos postes de charge comparés aux fourchettes habituelles d'un traiteur événementiel en France. Ce sont des repères de pilotage, pas des normes absolues — à recouper avec votre expert-comptable.
-    </div>
-
-    {/* Marge nette en avant, c'est l'indicateur de synthèse le plus parlant */}
-    <div style={{background:statutBg[margeStatut],border:`1px solid ${statutColor[margeStatut]}33`,borderRadius:10,padding:14,marginBottom:14}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div>
-          <div style={{fontSize:12,fontWeight:700,color:statutColor[margeStatut]}}>{statutIcon[margeStatut]} Marge nette</div>
-          <div style={{fontSize:10,color:C.textMuted,marginTop:2}}>Repère secteur : {margeRef.min}–{margeRef.max}%</div>
-        </div>
-        <div style={{fontSize:22,fontWeight:800,color:statutColor[margeStatut]}}>{margeNettePct.toFixed(1)}%</div>
-      </div>
-    </div>
-
-    <div style={{display:"flex",flexDirection:"column",gap:10}}>
-      {rows.map(r=>{
-        const barPct = Math.min(100, (r.pct/r.ref.max)*100);
-        return <div key={r.key} style={r.isSynthese?{paddingTop:10,borderTop:`1px solid ${C.border}`}:{}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-              <span style={{fontSize:12,flexShrink:0}}>{statutIcon[r.statut]}</span>
-              <span style={{fontSize:13,fontWeight:r.isSynthese?700:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</span>
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-              <span style={{fontSize:11,color:C.textLight}}>repère {r.ref.min}–{r.ref.max}%</span>
-              <span style={{fontSize:13,fontWeight:700,color:statutColor[r.statut],minWidth:50,textAlign:"right"}}>{r.pct.toFixed(1)}%</span>
-            </div>
-          </div>
-          <div style={{background:C.bg,borderRadius:3,height:6,overflow:"hidden"}}>
-            <div style={{width:`${barPct}%`,height:"100%",borderRadius:3,background:statutColor[r.statut],transition:"width 0.5s"}}/>
-          </div>
-          <div style={{fontSize:10,color:C.textLight,marginTop:2}}>{r.montant.toLocaleString("fr-FR",{maximumFractionDigits:0})} € · {r.ref.note}</div>
-        </div>;
-      })}
-    </div>
-  </Card>;
-}
-
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({data,moisData,onUpdateMois}){
   const [montantEvent,setMontantEvent]=useState("");
   const [modeEvent,setModeEvent]=useState("");
-  const [savingEvent,setSavingEvent]=useState(false);
   const tL=totalLabo(data.laboCats,moisData.laboCh);
   const rep=repartition(moisData.pdv);
   const pdvs=PDV_LIST.map(p=>({...p,c:calcPDV(moisData.pdv[p.id],data.pdvCats[p.id],rep[p.id],tL)}));
@@ -2852,32 +1855,18 @@ function Dashboard({data,moisData,onUpdateMois}){
   const today=todayKey();
   const cloturesDuJour=PDV_LIST.flatMap(p=>(moisData.pdv[p.id]?.clotures||[]).filter(c=>c.date===today));
 
-  // Outils de pilotage : décomposition CA→résultat + top charges du mois
-  const totalChargesPDV = totalChargesDirectesPDV(moisData.pdv, data.pdvCats);
-  const autresChargesLabo = tL - totalMat;
-  const topChargesRows = topCharges(data, moisData, data.active, 8, 3);
-  const comparaisonRows = comparaisonSectorielle(data, moisData, tCA);
-  const margeNettePct = tCA>0 ? (tNet/tCA)*100 : 0;
-
-  // CORRECTIF ANTI-ÉCRASEMENT : onUpdateMois (= upd, voir AppPatron) recharge
-  // déjà Supabase juste avant d'écrire et applique ce mutateur sur le mois
-  // FRAIS — jamais sur un state React local potentiellement périmé. C'est le
-  // même point d'entrée sécurisé utilisé par toutes les autres écritures.
-  const ajouterEvenementiel=async ()=>{
+  const ajouterEvenementiel=()=>{
     if(!n(montantEvent)) return;
-    setSavingEvent(true);
+    const ev = moisData.pdv.evenementiel||{ca:0,encaissements:[]};
     const newEnc = {
       id:uid(), montant:n(montantEvent),
       modeLabel:modeEvent||"Non précisé",
       date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR")
     };
-    await onUpdateMois(freshMois=>{
-      const ev = freshMois.pdv.evenementiel||{ca:0,encaissements:[]};
-      const encaissements = [...(ev.encaissements||[]), newEnc];
-      const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
-      return {...freshMois, pdv:{...freshMois.pdv, evenementiel:{ca:newCa, encaissements}}};
-    });
-    setMontantEvent(""); setModeEvent(""); setSavingEvent(false);
+    const encaissements = [...(ev.encaissements||[]), newEnc];
+    const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
+    onUpdateMois({...moisData, pdv:{...moisData.pdv, evenementiel:{ca:newCa, encaissements}}});
+    setMontantEvent(""); setModeEvent("");
   };
 
   return <div>
@@ -2890,13 +1879,7 @@ function Dashboard({data,moisData,onUpdateMois}){
       <KPICard label="Marge brute" value={`${pctMB.toFixed(1)}%`} sub={<Badge val={pctMB}/>} color={C.primary}/>
       <KPICard label="Résultat net" value={`${tNet.toLocaleString("fr-FR")} €`} sub={<Badge val={tCA>0?tNet/tCA*100:0}/>} color={tNet>=0?C.green:C.red}/>
       <KPICard label="Charges labo" value={`${tL.toLocaleString("fr-FR")} €`} color={C.accent}/>
-      <KPICard label="Charges directes PDV" value={`${totalChargesPDV.toLocaleString("fr-FR")} €`} color={C.accent}/>
     </div>
-
-    <CascadeResultat tCA={tCA} totalMat={totalMat} tMB={tMB} autresChargesLabo={autresChargesLabo} totalChargesPDV={totalChargesPDV} tNet={tNet}/>
-    <TopChargesPanel rows={topChargesRows} tCA={tCA}/>
-    <ComparaisonSectoriellePanel rows={comparaisonRows} margeNettePct={margeNettePct} objectifs={data.objectifsSectoriels}/>
-
     <Card style={{background:C.fixeLight,marginBottom:20}} pad={16}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div style={{fontSize:13,fontWeight:700,color:C.fixe}}>🎉 CA Événementiel ce mois</div>
@@ -2923,9 +1906,9 @@ function Dashboard({data,moisData,onUpdateMois}){
           <option value="Chèque">Chèque</option>
           <option value="CB">CB</option>
         </select>
-        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)||!modeEvent||savingEvent}
-          style={{...base,background:n(montantEvent)&&modeEvent&&!savingEvent?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)&&modeEvent&&!savingEvent?"pointer":"not-allowed"}}>
-          {savingEvent?"⏳...":"+ Ajouter"}
+        <button onClick={ajouterEvenementiel} disabled={!n(montantEvent)||!modeEvent}
+          style={{...base,background:n(montantEvent)&&modeEvent?C.fixe:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"9px 16px",fontWeight:600,fontSize:13,cursor:n(montantEvent)&&modeEvent?"pointer":"not-allowed"}}>
+          + Ajouter
         </button>
       </div>
     </Card>
@@ -3020,7 +2003,7 @@ function ControleCaisse({moisData, paiements}){
     {/* Détail par mode de paiement */}
     <SectionHead>Détail par mode de paiement</SectionHead>
     <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
-      {tousLesModes.length===0 && caEventEspeces===0 && (
+      {tousLesModes.length===0 && caEvent===0 && (
         <Card pad={24} style={{textAlign:"center"}}>
           <div style={{color:C.textLight,fontSize:13}}>Aucune clôture saisie ce mois-ci</div>
         </Card>
@@ -3102,6 +2085,422 @@ function ControleCaisse({moisData, paiements}){
   </div>;
 }
 
+// ─── PROJETS / BÉNÉFICE PROJET ───────────────────────────────────────────────
+async function loadProjets(){
+  try{
+    const { data, error } = await supabase.from("app_data").select("projets").eq("id","main").maybeSingle();
+    if(error || !data) return [];
+    return data.projets || [];
+  }catch{ return []; }
+}
+async function saveProjets(projets){
+  try{ await supabase.from("app_data").update({ projets }).eq("id","main"); }
+  catch(err){ console.error("save projets error",err); }
+}
+
+function ProjetForm({projet, cats, onSave, onCancel}){
+  const [nom,setNom]=useState(projet?.nom||"");
+  const [date,setDate]=useState(projet?.date||new Date().toISOString().slice(0,10));
+  const [desc,setDesc]=useState(projet?.description||"");
+  const [prixVente,setPrixVente]=useState(projet?.prixVente||"");
+  const [charges,setCharges]=useState(projet?.chargesPrev||[]);
+  const [chargeForm,setChargeForm]=useState({label:"",catId:cats[0]?.id||"",montant:""});
+
+  const totalCharges = charges.reduce((s,c)=>s+n(c.montant),0);
+  const benefice = n(prixVente) - totalCharges;
+  const marge = n(prixVente)>0 ? benefice/n(prixVente)*100 : 0;
+
+  const ajouterCharge=()=>{
+    if(!n(chargeForm.montant)||!chargeForm.label.trim()) return;
+    const cat = cats.find(c=>c.id===chargeForm.catId);
+    setCharges(cs=>[...cs,{id:uid(),label:chargeForm.label,catId:chargeForm.catId,catLabel:cat?.label||"",montant:n(chargeForm.montant)}]);
+    setChargeForm({...chargeForm,label:"",montant:""});
+  };
+
+  const save=()=>{
+    if(!nom.trim()||!n(prixVente)) return;
+    onSave({
+      ...(projet||{}),
+      id: projet?.id||uid(),
+      nom, date, description:desc,
+      prixVente:n(prixVente),
+      chargesPrev:charges,
+      statut: projet?.statut||"simulation",
+      chargesReel: projet?.chargesReel||[],
+      caReel: projet?.caReel||0,
+      createdAt: projet?.createdAt||new Date().toISOString(),
+    });
+  };
+
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <SectionHead>📋 Informations du projet</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div><Label>Nom du projet</Label>
+          <input value={nom} onChange={e=>setNom(e.target.value)} placeholder="Ex: Mariage Dupont, Cocktail entreprise..."
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><Label>Date prévue</Label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+              style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/></div>
+          <div><Label>Prix de vente (CA)</Label><MoneyInput value={prixVente} onChange={setPrixVente}/></div>
+        </div>
+        <div><Label>Description (optionnel)</Label>
+          <textarea value={desc} onChange={e=>setDesc(e.target.value)} rows={2} placeholder="Détails, nombre de convives, lieu..."
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",resize:"vertical"}}/></div>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:16}}>
+      <SectionHead>💸 Charges prévisionnelles</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
+        {charges.map((c,i)=>(
+          <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.bg,borderRadius:8,padding:"8px 12px"}}>
+            <div><div style={{fontSize:13,fontWeight:500}}>{c.label}</div>
+              <div style={{fontSize:11,color:C.textMuted}}>{c.catLabel}</div></div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <strong>{n(c.montant).toLocaleString("fr-FR")} €</strong>
+              <button onClick={()=>setCharges(cs=>cs.filter((_,j)=>j!==i))} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:12}}>×</button>
+            </div>
+          </div>
+        ))}
+        {charges.length===0 && <div style={{fontSize:12,color:C.textLight,textAlign:"center",padding:"12px 0"}}>Aucune charge ajoutée</div>}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,background:C.bg,borderRadius:8,padding:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div><Label>Description de la charge</Label>
+            <input value={chargeForm.label} onChange={e=>setChargeForm({...chargeForm,label:e.target.value})} placeholder="Ex: Location salle, Extras..."
+              style={{...base,width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:13}}/></div>
+          <div><Label>Catégorie</Label>
+            <select value={chargeForm.catId} onChange={e=>setChargeForm({...chargeForm,catId:e.target.value})}
+              style={{...base,width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}>
+              <CatOptions cats={cats}/>
+            </select></div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}><Label>Montant</Label><MoneyInput value={chargeForm.montant} onChange={v=>setChargeForm({...chargeForm,montant:v})}/></div>
+          <div style={{alignSelf:"flex-end"}}>
+            <button onClick={ajouterCharge} disabled={!n(chargeForm.montant)||!chargeForm.label.trim()}
+              style={{...base,background:n(chargeForm.montant)&&chargeForm.label.trim()?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"10px 16px",fontWeight:600,cursor:"pointer"}}>
+              + Ajouter
+            </button>
+          </div>
+        </div>
+      </div>
+    </Card>
+
+    {/* Résumé prévisionnel */}
+    <Card style={{background:benefice>=0?C.primaryLight:C.redLight,marginBottom:16}} pad={16}>
+      <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>CA prévisionnel</div>
+          <div style={{fontSize:20,fontWeight:700}}>{n(prixVente).toLocaleString("fr-FR")} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Charges</div>
+          <div style={{fontSize:20,fontWeight:700,color:C.red}}>− {totalCharges.toLocaleString("fr-FR")} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Bénéfice net</div>
+          <div style={{fontSize:24,fontWeight:800,color:benefice>=0?C.green:C.red}}>{benefice.toLocaleString("fr-FR")} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Marge</div>
+          <div style={{fontSize:24,fontWeight:800,color:benefice>=0?C.green:C.red}}>{marge.toFixed(1)} %</div></div>
+      </div>
+    </Card>
+
+    <div style={{display:"flex",gap:10}}>
+      <button onClick={onCancel} style={{...base,flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px",fontWeight:600,cursor:"pointer",color:C.textMuted}}>Annuler</button>
+      <button onClick={save} disabled={!nom.trim()||!n(prixVente)}
+        style={{...base,flex:2,background:nom.trim()&&n(prixVente)?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:10,padding:"12px",fontWeight:700,cursor:nom.trim()&&n(prixVente)?"pointer":"not-allowed"}}>
+        Enregistrer le projet
+      </button>
+    </div>
+  </div>;
+}
+
+function ProjetDetail({projet, cats, onBack, onUpdate, moisData, onUpdateMois}){
+  const [ajoutReelForm,setAjoutReelForm]=useState({label:"",catId:cats[0]?.id||"",montant:""});
+  const [caReelInput,setCaReelInput]=useState(projet.caReel||"");
+  const [confirmerReel,setConfirmerReel]=useState(false);
+  const [destScope,setDestScope]=useState("labo");
+  const [destPdvId,setDestPdvId]=useState(PDV_LIST[0]?.id||"");
+
+  const totalPrev = (projet.chargesPrev||[]).reduce((s,c)=>s+n(c.montant),0);
+  const totalReel = (projet.chargesReel||[]).reduce((s,c)=>s+n(c.montant),0);
+  const benPrev = n(projet.prixVente) - totalPrev;
+  const benReel = n(projet.caReel||projet.prixVente) - totalReel;
+  const isReel = projet.statut==="reel";
+
+  // Applique une charge réelle dans le Dashboard (laboCh ou vars du PDV)
+  const appliquerChargeDansDashboard=(mois, dep, scope, pdvId)=>{
+    let laboCh={...mois.laboCh};
+    let pdvObj={...mois.pdv};
+    if(scope==="labo"){
+      laboCh[dep.catId]=(n(laboCh[dep.catId])||0)+dep.montant;
+    } else {
+      const pm=pdvObj[pdvId]||{ca:0,vars:{},clotures:[]};
+      pdvObj={...pdvObj,[pdvId]:{...pm,vars:{...pm.vars,[dep.catId]:(n(pm.vars?.[dep.catId])||0)+dep.montant}}};
+    }
+    return {...mois,laboCh,pdv:pdvObj};
+  };
+
+  const ajouterChargeReel=()=>{
+    if(!n(ajoutReelForm.montant)||!ajoutReelForm.label.trim()) return;
+    const cat=cats.find(c=>c.id===ajoutReelForm.catId);
+    const dep={id:uid(),label:ajoutReelForm.label,catId:ajoutReelForm.catId,catLabel:cat?.label||"",montant:n(ajoutReelForm.montant)};
+    const newCharges=[...(projet.chargesReel||[]),dep];
+    onUpdate({...projet,chargesReel:newCharges});
+    // Appliquer immédiatement au Dashboard
+    const scope=projet.destScope||"labo";
+    const pdvId=projet.destPdvId||PDV_LIST[0]?.id;
+    onUpdateMois(appliquerChargeDansDashboard(moisData, dep, scope, pdvId));
+    setAjoutReelForm({...ajoutReelForm,label:"",montant:""});
+  };
+
+  const basculerReel=()=>{
+    const caReel=n(caReelInput)||n(projet.prixVente);
+    // Ajoute CA au Dashboard événementiel
+    const ev=moisData.pdv.evenementiel||{ca:0,encaissements:[]};
+    const newEnc={id:uid(),montant:caReel,modeLabel:"Virement bancaire",date:todayKey(),dateLabel:new Date().toLocaleDateString("fr-FR"),projetNom:projet.nom};
+    const encaissements=[...(ev.encaissements||[]),newEnc];
+    onUpdateMois({...moisData,pdv:{...moisData.pdv,evenementiel:{ca:(n(ev.ca)+caReel),encaissements}}});
+    onUpdate({...projet,statut:"reel",caReel,destScope,destPdvId});
+    setConfirmerReel(false);
+  };
+
+  const exportPDF=()=>{
+    const lines=[
+      `BÉNÉFICE PROJET — ${projet.nom}`,
+      `Date : ${projet.date} | Statut : ${isReel?"Réel":"Simulation"}`,
+      ``,
+      `PRÉVISIONNEL`,
+      `CA prévu : ${n(projet.prixVente).toLocaleString("fr-FR")} €`,
+      ...(projet.chargesPrev||[]).map(c=>`  ${c.label} (${c.catLabel}) : ${n(c.montant).toLocaleString("fr-FR")} €`),
+      `Total charges : ${totalPrev.toLocaleString("fr-FR")} €`,
+      `Bénéfice net prévu : ${benPrev.toLocaleString("fr-FR")} €`,
+      `Marge : ${n(projet.prixVente)>0?(benPrev/n(projet.prixVente)*100).toFixed(1):0} %`,
+      ...(isReel?[
+        ``,`RÉEL`,
+        `CA réel : ${n(projet.caReel).toLocaleString("fr-FR")} €`,
+        ...(projet.chargesReel||[]).map(c=>`  ${c.label} (${c.catLabel}) : ${n(c.montant).toLocaleString("fr-FR")} €`),
+        `Total charges réelles : ${totalReel.toLocaleString("fr-FR")} €`,
+        `Bénéfice net réel : ${benReel.toLocaleString("fr-FR")} €`,
+        `Marge réelle : ${n(projet.caReel)>0?(benReel/n(projet.caReel)*100).toFixed(1):0} %`,
+      ]:[]),
+      ``,`Généré par Suivi Performance — Traiteur Grec`,
+    ];
+    const blob=new Blob([lines.join("\n")],{type:"text/plain"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`projet-${projet.nom.replace(/\s+/g,"-")}.txt`;
+    a.click();
+  };
+
+  return <div>
+    <button onClick={onBack} style={{...base,background:"none",border:"none",cursor:"pointer",color:C.textMuted,fontSize:13,marginBottom:16,display:"flex",alignItems:"center",gap:4}}>← Retour aux projets</button>
+
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8,marginBottom:20}}>
+      <div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{fontWeight:800,fontSize:20}}>{projet.nom}</div>
+          <span style={{fontSize:11,fontWeight:700,background:isReel?C.greenLight:C.fixeLight,color:isReel?C.green:C.fixe,borderRadius:20,padding:"2px 10px"}}>
+            {isReel?"✅ Réel":"🔵 Simulation"}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{projet.date}{projet.description?` · ${projet.description}`:""}</div>
+      </div>
+      <button onClick={exportPDF} style={{...base,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:12,fontWeight:500}}>
+        📄 Exporter
+      </button>
+    </div>
+
+    {/* KPIs côte à côte */}
+    <div style={{display:"grid",gridTemplateColumns:isReel?"1fr 1fr":"1fr",gap:12,marginBottom:20}}>
+      <Card style={{background:benPrev>=0?C.primaryLight:C.redLight}} pad={16}>
+        <div style={{fontSize:11,fontWeight:700,color:C.textMuted,textTransform:"uppercase",marginBottom:8}}>🔵 Prévisionnel</div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+          <div><div style={{fontSize:10,color:C.textMuted}}>CA</div><div style={{fontSize:18,fontWeight:700}}>{n(projet.prixVente).toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Charges</div><div style={{fontSize:18,fontWeight:700,color:C.red}}>−{totalPrev.toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Bénéfice</div><div style={{fontSize:22,fontWeight:800,color:benPrev>=0?C.green:C.red}}>{benPrev.toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Marge</div><div style={{fontSize:22,fontWeight:800,color:benPrev>=0?C.green:C.red}}>{n(projet.prixVente)>0?(benPrev/n(projet.prixVente)*100).toFixed(1):0}%</div></div>
+        </div>
+      </Card>
+      {isReel && <Card style={{background:benReel>=0?C.greenLight:C.redLight}} pad={16}>
+        <div style={{fontSize:11,fontWeight:700,color:C.textMuted,textTransform:"uppercase",marginBottom:8}}>✅ Réel</div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+          <div><div style={{fontSize:10,color:C.textMuted}}>CA</div><div style={{fontSize:18,fontWeight:700}}>{n(projet.caReel).toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Charges</div><div style={{fontSize:18,fontWeight:700,color:C.red}}>−{totalReel.toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Bénéfice</div><div style={{fontSize:22,fontWeight:800,color:benReel>=0?C.green:C.red}}>{benReel.toLocaleString("fr-FR")} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Marge</div><div style={{fontSize:22,fontWeight:800,color:benReel>=0?C.green:C.red}}>{n(projet.caReel)>0?(benReel/n(projet.caReel)*100).toFixed(1):0}%</div></div>
+        </div>
+      </Card>}
+    </div>
+
+    {/* Charges prévisionnelles */}
+    <Card style={{marginBottom:16}}>
+      <SectionHead>💸 Charges prévisionnelles</SectionHead>
+      {(projet.chargesPrev||[]).map(c=>(
+        <div key={c.id} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
+          <span>{c.label} <span style={{fontSize:11,color:C.textMuted}}>· {c.catLabel}</span></span>
+          <strong>{n(c.montant).toLocaleString("fr-FR")} €</strong>
+        </div>
+      ))}
+      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontWeight:700}}>
+        <span>Total</span><span>{totalPrev.toLocaleString("fr-FR")} €</span>
+      </div>
+    </Card>
+
+    {/* Section réel */}
+    {isReel && <Card style={{marginBottom:16}}>
+      <SectionHead>✅ Charges réelles</SectionHead>
+      {projet.destScope && <div style={{fontSize:11,color:C.textMuted,marginBottom:10,background:C.bg,borderRadius:6,padding:"4px 10px",display:"inline-block"}}>
+        → Affectées au {projet.destScope==="labo"?"🏭 Laboratoire":`${PDV_LIST.find(p=>p.id===projet.destPdvId)?.emoji} ${PDV_LIST.find(p=>p.id===projet.destPdvId)?.full}`}
+      </div>}
+      {(projet.chargesReel||[]).length===0 && <div style={{fontSize:12,color:C.textLight,marginBottom:12}}>Aucune charge réelle saisie</div>}
+      {(projet.chargesReel||[]).map((c,i)=>(
+        <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
+          <span>{c.label} <span style={{fontSize:11,color:C.textMuted}}>· {c.catLabel}</span></span>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <strong>{n(c.montant).toLocaleString("fr-FR")} €</strong>
+            <button onClick={()=>onUpdate({...projet,chargesReel:(projet.chargesReel||[]).filter((_,j)=>j!==i)})}
+              style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:5,padding:"3px 8px",cursor:"pointer",fontSize:11}}>×</button>
+          </div>
+        </div>
+      ))}
+      {(projet.chargesReel||[]).length>0 && <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontWeight:700}}>
+        <span>Total réel</span><span>{totalReel.toLocaleString("fr-FR")} €</span>
+      </div>}
+      <div style={{marginTop:12,display:"flex",flexDirection:"column",gap:8,background:C.bg,borderRadius:8,padding:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div><Label>Description</Label>
+            <input value={ajoutReelForm.label} onChange={e=>setAjoutReelForm({...ajoutReelForm,label:e.target.value})} placeholder="Dépense réelle..."
+              style={{...base,width:"100%",padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
+          <div><Label>Catégorie</Label>
+            <select value={ajoutReelForm.catId} onChange={e=>setAjoutReelForm({...ajoutReelForm,catId:e.target.value})}
+              style={{...base,width:"100%",padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:11}}>
+              <CatOptions cats={cats}/>
+            </select></div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}><Label>Montant</Label><MoneyInput value={ajoutReelForm.montant} onChange={v=>setAjoutReelForm({...ajoutReelForm,montant:v})}/></div>
+          <div style={{alignSelf:"flex-end"}}>
+            <button onClick={ajouterChargeReel} disabled={!n(ajoutReelForm.montant)||!ajoutReelForm.label.trim()}
+              style={{...base,background:C.primary,color:"#fff",border:"none",borderRadius:8,padding:"10px 14px",fontWeight:600,cursor:"pointer",fontSize:12}}>+ Ajouter</button>
+          </div>
+        </div>
+      </div>
+    </Card>}
+
+    {/* Basculer en réel */}
+    {!isReel && <Card style={{background:C.fixeLight}} pad={16}>
+      <SectionHead>🚀 Convertir en événement réel</SectionHead>
+      <div style={{fontSize:12,color:C.textMuted,marginBottom:12}}>Une fois converti, le CA sera ajouté à votre CA événementiel du mois en cours.</div>
+      {confirmerReel ? <div>
+        <div style={{marginBottom:10}}>
+          <Label>CA réel encaissé (laisser vide = CA prévisionnel)</Label>
+          <MoneyInput value={caReelInput} onChange={setCaReelInput}/>
+        </div>
+        <div style={{marginBottom:10}}>
+          <Label>Affecter les charges réelles au Dashboard dans…</Label>
+          <select value={destScope==="labo"?"labo":`pdv:${destPdvId}`}
+            onChange={e=>{
+              const v=e.target.value;
+              if(v==="labo") setDestScope("labo");
+              else { setDestScope("pdv"); setDestPdvId(v.split(":")[1]); }
+            }}
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:13}}>
+            <option value="labo">🏭 Laboratoire</option>
+            {PDV_LIST.map(p=><option key={p.id} value={`pdv:${p.id}`}>{p.emoji} {p.full}</option>)}
+          </select>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setConfirmerReel(false)} style={{...base,flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",color:C.textMuted,fontWeight:500}}>Annuler</button>
+          <button onClick={basculerReel} style={{...base,flex:2,background:C.green,color:"#fff",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer"}}>✅ Confirmer</button>
+        </div>
+      </div> : <button onClick={()=>setConfirmerReel(true)} style={{...base,background:C.primary,color:"#fff",border:"none",borderRadius:8,padding:"10px 18px",fontWeight:600,cursor:"pointer"}}>
+        Convertir en réel
+      </button>}
+    </Card>}
+  </div>;
+}
+
+function PanneauProjets({data, moisData, onUpdateMois}){
+  const [projets,setProjets]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [vue,setVue]=useState("liste"); // liste | nouveau | detail
+  const [projetSelec,setProjetSelec]=useState(null);
+  const cats = data.laboCats;
+
+  useEffect(()=>{ loadProjets().then(p=>{ setProjets(p); setLoading(false); }); },[]);
+
+  const sauvegarder=async(p)=>{
+    const idx=projets.findIndex(x=>x.id===p.id);
+    const newList = idx>=0 ? projets.map(x=>x.id===p.id?p:x) : [...projets,p];
+    setProjets(newList);
+    await saveProjets(newList);
+    setProjetSelec(p);
+    setVue("detail");
+  };
+
+  const supprimer=async(id)=>{
+    const newList=projets.filter(p=>p.id!==id);
+    setProjets(newList);
+    await saveProjets(newList);
+    setVue("liste");
+  };
+
+  if(loading) return <Card pad={24}><div style={{color:C.textMuted}}>Chargement…</div></Card>;
+
+  if(vue==="nouveau") return <ProjetForm cats={cats} onSave={sauvegarder} onCancel={()=>setVue("liste")}/>;
+
+  if(vue==="detail"&&projetSelec) return <ProjetDetail
+    projet={projets.find(p=>p.id===projetSelec.id)||projetSelec}
+    cats={cats}
+    onBack={()=>setVue("liste")}
+    moisData={moisData}
+    onUpdateMois={onUpdateMois}
+    onUpdate={async(p)=>{ await sauvegarder(p); setProjetSelec(p); }}/>;
+
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div style={{fontSize:13,color:C.textMuted}}>{projets.length} projet(s) enregistré(s)</div>
+      <button onClick={()=>setVue("nouveau")} style={{...base,background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"10px 18px",fontWeight:700,cursor:"pointer"}}>
+        + Nouveau projet
+      </button>
+    </div>
+    {projets.length===0 && <Card pad={32} style={{textAlign:"center"}}>
+      <div style={{fontSize:40,marginBottom:12}}>🎯</div>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:6}}>Aucun projet</div>
+      <div style={{fontSize:13,color:C.textMuted}}>Créez votre premier projet pour simuler la rentabilité d'un événement.</div>
+    </Card>}
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {[...projets].sort((a,b)=>b.createdAt?.localeCompare(a.createdAt||"")||0).map(p=>{
+        const totalPrev=(p.chargesPrev||[]).reduce((s,c)=>s+n(c.montant),0);
+        const benPrev=n(p.prixVente)-totalPrev;
+        const isReel=p.statut==="reel";
+        return <Card key={p.id} pad={16} style={{cursor:"pointer"}} onClick={()=>{setProjetSelec(p);setVue("detail");}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <div style={{fontWeight:700,fontSize:15}}>{p.nom}</div>
+                <span style={{fontSize:10,fontWeight:700,background:isReel?C.greenLight:C.fixeLight,color:isReel?C.green:C.fixe,borderRadius:20,padding:"2px 8px"}}>
+                  {isReel?"✅ Réel":"🔵 Simulation"}
+                </span>
+              </div>
+              <div style={{fontSize:12,color:C.textMuted}}>{p.date}{p.description?` · ${p.description}`:""}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:18,fontWeight:800,color:benPrev>=0?C.green:C.red}}>{benPrev.toLocaleString("fr-FR")} €</div>
+              <div style={{fontSize:11,color:C.textMuted}}>bénéfice prévu</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
+            <button onClick={e=>{e.stopPropagation();if(window.confirm("Supprimer ce projet ?"))supprimer(p.id);}}
+              style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:11,fontWeight:600}}>
+              Supprimer
+            </button>
+          </div>
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
 // ─── MON COMPTE (changement de mot de passe) ─────────────────────────────────
 function MonCompte({patron, onLogout}){
   const [pwd,setPwd]=useState("");
@@ -3114,6 +2513,7 @@ function MonCompte({patron, onLogout}){
     if(pwd!==pwd2){ setMsg({ok:false,txt:"Les deux mots de passe ne correspondent pas"}); return; }
     setLoading(true);
     const ok=await updatePatronPassword(patron.id, pwd);
+    await logActivity(patron,"mot_de_passe",{});
     setLoading(false);
     if(ok){ setMsg({ok:true,txt:"Mot de passe changé ! Reconnectez-vous avec votre nouveau mot de passe."}); setPwd(""); setPwd2(""); }
     else{ setMsg({ok:false,txt:"Erreur lors du changement"}); }
@@ -3150,50 +2550,70 @@ function MonCompte({patron, onLogout}){
   </div>;
 }
 
+// ─── JOURNAL D'ACTIVITÉ ───────────────────────────────────────────────────────
+function JournalActivite(){
+  const [logs,setLogs]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    loadActivityLog(200).then(data=>{ setLogs(data); setLoading(false); });
+  },[]);
+
+  const actionLabel={
+    connexion:"🔐 Connexion",
+    deconnexion:"🚪 Déconnexion",
+    import_csv:"📥 Import CSV",
+    depense_ajout:"💸 Dépense ajoutée",
+    depense_suppression:"🗑️ Dépense supprimée",
+    cloture_modif:"✏️ Clôture modifiée",
+    cloture_suppression:"🗑️ Clôture supprimée",
+    vendeur_ajout:"🧑‍💼 Vendeur ajouté",
+    vendeur_suppression:"🗑️ Vendeur supprimé",
+    mot_de_passe:"🔑 Mot de passe changé",
+  };
+
+  if(loading) return <Card pad={24}><div style={{color:C.textMuted,fontSize:13}}>Chargement du journal…</div></Card>;
+  if(logs.length===0) return <Card pad={24} style={{textAlign:"center"}}><div style={{color:C.textLight,fontSize:13}}>Aucune activité enregistrée</div></Card>;
+
+  return <div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {logs.map(log=>{
+        const date=new Date(log.created_at);
+        const dateStr=date.toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
+        const heureStr=date.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+        return <Card key={log.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:13}}>{actionLabel[log.action]||log.action}</div>
+              <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>par <strong>{log.patron_nom}</strong> · {dateStr} à {heureStr}</div>
+              {Object.keys(log.detail||{}).length>0 && <div style={{marginTop:6,display:"flex",gap:6,flexWrap:"wrap"}}>
+                {Object.entries(log.detail).map(([k,v])=>(
+                  <span key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.textMuted}}>
+                    {k} : {typeof v==="number"?v.toLocaleString("fr-FR")+" €":String(v)}
+                  </span>
+                ))}
+              </div>}
+            </div>
+          </div>
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
 function AppPatron({data,setData,patron,onLogout}){
   const [page,setPage]=useState("dashboard");
   const [menu,setMenu]=useState(false);
-  const [conflictMsg,setConflictMsg]=useState(null);
-  // Repliée par défaut : il faut cliquer pour dérouler les 10 points de vente,
-  // afin que la liste de gauche ne prenne pas trop de place.
-  const [pdvMenuOuvert,setPdvMenuOuvert]=useState(false);
   const key=data.active;
   const [an,mi]=key.split("-").map(Number);
   const getMois=()=>fillPdvKeys(data.mois[key]||initMois());
   const md=getMois();
-
-  const notifyConflict=()=>{
-    setConflictMsg("Les données ont été modifiées ailleurs entre-temps (autre appareil, import, ou saisie vendeur). Votre action a été appliquée sur la version la plus récente — rien n'a été perdu.");
-    setTimeout(()=>setConflictMsg(null), 8000);
-  };
-  const [errorMsg,setErrorMsg]=useState(null);
-  const notifyError=(msg)=>{
-    setErrorMsg(msg);
-    // Pas de disparition automatique pour une vraie erreur : contrairement au
-    // conflit (résolu automatiquement, informatif), une erreur réseau reste
-    // affichée jusqu'à ce que l'utilisateur la ferme, car elle peut nécessiter
-    // une action de sa part (réessayer, vérifier sa connexion).
-  };
-
-  // CORRECTIF ANTI-ÉCRASEMENT : point d'entrée UNIQUE pour toute modification
-  // du mois actif. mutatorFn reçoit toujours le mois FRAIS (rechargé depuis
-  // Supabase juste avant) et retourne le nouveau mois — jamais de state local
-  // périmé écrit directement en base.
-  const upd=async (mutatorFnOrObject)=>{
-    const mutatorFn = typeof mutatorFnOrObject==="function"
-      ? mutatorFnOrObject
-      : ()=>mutatorFnOrObject; // rétro-compatibilité : accepte aussi un objet mois direct
-    const newData = await safeWriteMois(data, key, mutatorFn, notifyConflict, notifyError);
-    setData(newData);
-  };
-  // Idem pour les données globales (catégories, vendeurs, paiements...)
-  const updData=async (mutatorFnOrObject)=>{
-    const mutatorFn = typeof mutatorFnOrObject==="function"
-      ? mutatorFnOrObject
-      : ()=>mutatorFnOrObject;
-    const newData = await safeWriteAppData(data, mutatorFn, notifyConflict, notifyError);
-    setData(newData);
-  };
+  const upd=nm=>setData(prev=>{
+    const u={...prev,mois:{...prev.mois,[key]:nm}};
+    saveCache(u); saveMoisToSupabase(key,nm);
+    return u;
+  });
+  const updData=nd=>{ saveCache(nd); saveAppDataToSupabase(nd); setData(nd); };
   const goMois=d=>{
     let m=mi+d,a=an; if(m>11){m=0;a++;} if(m<0){m=11;a--;}
     const k=`${a}-${m}`;
@@ -3213,28 +2633,17 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"clotures",label:"Clôtures",icon:"📋"},
     {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
+    ...PDV_LIST.map(p=>({id:p.id,label:p.nom,icon:p.emoji})),
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
-    {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
-    {id:"export",label:"Export",icon:"📄"},
+    {id:"projets",label:"Projets",icon:"🎯"},
     {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
-    {id:"rapprochement",label:"Rapprochement",icon:"🔍"},
+    {id:"journal",label:"Journal",icon:"📜"},
     {id:"compte",label:"Mon compte",icon:"🔑"},
   ];
   return <div style={{...base,minHeight:"100vh",background:C.bg}}>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
     <style>{`@media(min-width:768px){#sidebar{transform:translateX(0)!important;box-shadow:none!important;}#overlay{display:none!important;}#main{margin-left:224px!important;}}input[type=number]::-webkit-inner-spin-button{opacity:0}*{box-sizing:border-box;}`}</style>
-    {/* Bandeau de conflit — s'affiche quand une écriture concurrente a été détectée et automatiquement résolue */}
-    {conflictMsg && <div style={{position:"fixed",top:0,left:0,right:0,zIndex:300,background:C.warn,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:600,textAlign:"center",boxShadow:C.shadowMd}}>
-      ⚠️ {conflictMsg}
-    </div>}
-    {/* Bandeau d'erreur réseau — reste affiché jusqu'à fermeture manuelle, car
-        une vraie erreur de sauvegarde peut nécessiter une action du patron
-        (vérifier la connexion, réessayer) plutôt qu'un simple avertissement. */}
-    {errorMsg && <div style={{position:"fixed",top:0,left:0,right:0,zIndex:300,background:C.red,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:600,textAlign:"center",boxShadow:C.shadowMd,display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
-      <span>🔴 {errorMsg}</span>
-      <button onClick={()=>setErrorMsg(null)} style={{...base,background:"rgba(255,255,255,0.2)",border:"none",borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:600,color:"#fff",cursor:"pointer",flexShrink:0}}>OK</button>
-    </div>}
     {/* HEADER */}
     <div style={{background:C.white,borderBottom:`1px solid ${C.border}`,padding:"0 16px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,boxShadow:C.shadow}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -3255,27 +2664,14 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="sidebar" style={{width:224,flexShrink:0,background:C.white,borderRight:`1px solid ${C.border}`,padding:"10px 7px",overflowY:"auto",position:"fixed",top:56,bottom:0,left:0,zIndex:90,transform:menu?"translateX(0)":"translateX(-100%)",transition:"transform 0.22s",boxShadow:menu?C.shadowMd:"none"}}>
         {nav.map(item=>{
           const active=page===item.id;
+          let dot=null;
+          if(!["dashboard","depenses","clotures","import","labo","vendeurs","paiements","projets","caisse","journal","compte"].includes(item.id)){
+            const c=calcPDV(md.pdv[item.id],data.pdvCats[item.id],rep[item.id]||0,tL);
+            if(c&&c.ca>0) dot=<span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/>;
+          }
           return <button key={item.id} onClick={()=>{setPage(item.id);setMenu(false);}}
             style={{...base,width:"100%",textAlign:"left",padding:"10px 12px",borderRadius:8,border:"none",background:active?C.primaryLight:"transparent",color:active?C.primary:C.textMuted,cursor:"pointer",fontWeight:active?600:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
-            <span style={{fontSize:15}}>{item.icon}</span><span style={{flex:1}}>{item.label}</span>
-          </button>;
-        })}
-
-        {/* Catégorie repliable "Points de vente" — regroupe les 8 marchés + 2
-            boutiques pour ne pas surcharger la liste de gauche. Repliée par
-            défaut. Le Laboratoire reste une entrée indépendante au-dessus. */}
-        <button onClick={()=>setPdvMenuOuvert(o=>!o)}
-          style={{...base,width:"100%",textAlign:"left",padding:"10px 12px",borderRadius:8,border:"none",background:"transparent",color:C.textMuted,cursor:"pointer",fontWeight:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
-          <span style={{fontSize:15}}>🏪</span><span style={{flex:1}}>Points de vente</span>
-          <span style={{fontSize:11,color:C.textLight,transform:pdvMenuOuvert?"rotate(90deg)":"none",transition:"transform 0.15s"}}>›</span>
-        </button>
-        {pdvMenuOuvert && PDV_LIST.map(p=>{
-          const active=page===p.id;
-          const c=calcPDV(md.pdv[p.id],data.pdvCats[p.id],rep[p.id]||0,tL);
-          const dot = (c&&c.ca>0) ? <span style={{width:7,height:7,borderRadius:"50%",background:c.res>=0?C.green:C.red,display:"inline-block"}}/> : null;
-          return <button key={p.id} onClick={()=>{setPage(p.id);setMenu(false);}}
-            style={{...base,width:"100%",textAlign:"left",padding:"9px 12px 9px 30px",borderRadius:8,border:"none",background:active?C.primaryLight:"transparent",color:active?C.primary:C.textMuted,cursor:"pointer",fontWeight:active?600:400,display:"flex",alignItems:"center",gap:8,marginBottom:2,fontSize:13}}>
-            <span style={{fontSize:14}}>{p.emoji}</span><span style={{flex:1}}>{p.nom}</span>{dot}
+            <span style={{fontSize:15}}>{item.icon}</span><span style={{flex:1}}>{item.label}</span>{dot}
           </button>;
         })}
       </div>
@@ -3283,22 +2679,21 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="projets"?"🎯 Projets":page==="caisse"?"🏦 Contrôle caisse":page==="journal"?"📜 Journal d'activité":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
         {page==="dashboard"&&<Dashboard data={data} moisData={md} onUpdateMois={upd}/>}
         {page==="depenses"&&<PanneauDepenses data={data} md={md} onUpdateMois={upd} patron={patron}/>}
         {page==="clotures"&&<AllClotures moisData={md} onUpdateMois={upd} patron={patron}/>}
-        {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData(fresh=>({...fresh,laboCats:c}))} laboCh={md.laboCh} onLaboChChange={c=>upd(freshMois=>({...freshMois,laboCh:c}))} moisPdv={md.pdv}/>}
-        {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd(freshMois=>({...freshMois,pdv:{...freshMois.pdv,[page]:p}}))} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData(fresh=>({...fresh,pdvCats:{...fresh.pdvCats,[page]:c}}))} tLabo={tL} info={info} pct={rep[page]}/>}
-        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData(fresh=>({...fresh,vendeurs:v}))}/>}
-        {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
-        {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
-        {page==="objectifs"&&<GestionObjectifs objectifs={data.objectifsSectoriels} onChange={o=>updData(fresh=>({...fresh,objectifsSectoriels:o}))}/>}
-        {page==="export"&&<PanneauExport data={data}/>}
+        {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData({...data,laboCats:c})} laboCh={md.laboCh} onLaboChChange={c=>upd({...md,laboCh:c})} moisPdv={md.pdv}/>}
+        {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd({...md,pdv:{...md.pdv,[page]:p}})} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData({...data,pdvCats:{...data.pdvCats,[page]:c}})} tLabo={tL} info={info} pct={rep[page]}/>}
+        {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData({...data,vendeurs:v})}/>}
+        {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={(newData,newMois)=>{ updData(newData); upd(newMois); }}/>}
+        {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData({...data,paiements:p})}/>}
+        {page==="projets"&&<PanneauProjets data={data} moisData={md} onUpdateMois={upd}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
-        {page==="rapprochement"&&<PanneauRapprochement moisData={md}/>}
+        {page==="journal"&&<JournalActivite/>}
         {page==="compte"&&<MonCompte patron={patron} onLogout={onLogout}/>}
       </div>
     </div>
@@ -3309,47 +2704,66 @@ function AppPatron({data,setData,patron,onLogout}){
 export default function App(){
   const [data,setData]=useState(()=>loadCache()||initLocal());
   const [ready,setReady]=useState(false);
-  const [syncError,setSyncError]=useState(null); // null = pas d'erreur, sinon message d'erreur
-  const [retryCount,setRetryCount]=useState(0);
+  const [syncError,setSyncError]=useState(false);
   // Toujours démarrer sur l'écran de connexion
   const [session,setSession]=useState(null); // null | {role:"patron"} | {role:"vendeur", vendeur:{}}
 
   useEffect(()=>{
     let mounted=true;
-    loadFromSupabase().then(({data:remote, error})=>{
+    loadFromSupabase().then(remote=>{
       if(!mounted) return;
       if(remote){
         const migrated = migrateLaboCats(remote);
         setData(migrated); saveCache(migrated);
-        setSyncError(null);
         if(migrated!==remote) saveAppDataToSupabase(migrated);
       }
-      else if(error){
-        // Vraie erreur réseau/Supabase : on le signale clairement plutôt que
-        // de basculer silencieusement sur le cache local sans prévenir.
-        const hasCache = !!loadCache();
-        setSyncError(hasCache
-          ? `Connexion au serveur impossible (${error}). Vous travaillez actuellement sur une copie locale enregistrée sur cet appareil — vos nouvelles saisies pourront ne pas se synchroniser tant que la connexion n'est pas rétablie.`
-          : `Connexion au serveur impossible (${error}), et aucune donnée locale disponible sur cet appareil. Vérifiez votre connexion internet puis réessayez.`);
-      }
-      // Si remote est null sans erreur : première utilisation, pas de souci réseau, rien à signaler.
+      else { setSyncError(true); }
       setReady(true);
     });
     return ()=>{ mounted=false; };
-  },[retryCount]);
-
-  const reessayerChargement = ()=>{
-    setReady(false);
-    setRetryCount(c=>c+1);
-  };
+  },[]);
 
   // Sauvegarde déclenchée par la clôture d'un vendeur
-  const handleVendeurSave=async (nd)=>{
-    saveCache(nd); // toujours sauvegardé localement en premier, même si le réseau échoue ensuite
+  const handleVendeurSave=async(nd)=>{
+    saveCache(nd);
     setData(nd);
     const key=nd.active;
-    const { success, error } = await saveMoisToSupabase(key, nd.mois[key]);
-    return { success, error };
+    const newMois=nd.mois[key];
+    try{
+      // Relire Supabase pour récupérer les clôtures déjà enregistrées
+      // (évite qu'une 2e clôture écrase la 1ère si les deux arrivent vite)
+      const {data:row}=await supabase.from("mois_data").select("pdv").eq("mois_key",key).maybeSingle();
+      if(row?.pdv){
+        const remotePdv=row.pdv;
+        const mergedPdv={...newMois.pdv};
+        // Pour chaque PDV, fusionner les clôtures distantes avec les locales
+        PDV_LIST.forEach(p=>{
+          const remoteClotures=remotePdv[p.id]?.clotures||[];
+          const localClotures=newMois.pdv[p.id]?.clotures||[];
+          // On garde toutes les clôtures distantes + les nouvelles locales non présentes
+          const remoteIds=new Set(remoteClotures.map(c=>c.id));
+          const nouvellesClotures=localClotures.filter(c=>!remoteIds.has(c.id));
+          const merged=[...remoteClotures,...nouvellesClotures];
+          const ca=caDepuisClotures(merged);
+          mergedPdv[p.id]={...newMois.pdv[p.id],...remotePdv[p.id],clotures:merged,ca};
+        });
+        // Fusionner aussi _depenses
+        const remoteDepenses=remotePdv._depenses||[];
+        const localDepenses=newMois.pdv._depenses||[];
+        const remoteDepIds=new Set(remoteDepenses.map(d=>d.id));
+        const nouvellesDepenses=localDepenses.filter(d=>!remoteDepIds.has(d.id));
+        mergedPdv._depenses=[...remoteDepenses,...nouvellesDepenses];
+        const mergedMois={...newMois,pdv:mergedPdv};
+        await saveMoisToSupabase(key,mergedMois);
+        // Mettre à jour le state local avec la version fusionnée
+        const merged={...nd,mois:{...nd.mois,[key]:mergedMois}};
+        saveCache(merged);
+        setData(merged);
+        return;
+      }
+    }catch(err){console.error("merge error",err);}
+    // Fallback si pas de données distantes
+    await saveMoisToSupabase(key,newMois);
   };
 
   if(!ready) return (
@@ -3359,35 +2773,12 @@ export default function App(){
     </div>
   );
 
-  // Erreur de connexion au démarrage : on informe clairement plutôt que de
-  // laisser l'utilisateur travailler sans savoir que la synchronisation a un
-  // problème (risque de saisies non sauvegardées en ligne, silencieusement).
-  if(syncError){
-    const hasCache = !!loadCache();
-    return (
-      <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#2d6a4f,#1b4332)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-        <div style={{background:"#fff",borderRadius:16,padding:28,maxWidth:420,width:"100%",textAlign:"center"}}>
-          <div style={{fontSize:44,marginBottom:10}}>⚠️</div>
-          <div style={{fontWeight:800,fontSize:17,marginBottom:10,color:"#c1121f"}}>Problème de connexion</div>
-          <div style={{fontSize:13,color:"#6c757d",marginBottom:20,lineHeight:1.5}}>{syncError}</div>
-          <button onClick={reessayerChargement}
-            style={{fontFamily:"'Inter',sans-serif",width:"100%",background:"#2d6a4f",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:14,cursor:"pointer",marginBottom:hasCache?10:0}}>
-            🔄 Réessayer
-          </button>
-          {hasCache && <button onClick={()=>setSyncError(null)}
-            style={{fontFamily:"'Inter',sans-serif",width:"100%",background:"transparent",color:"#6c757d",border:"1px solid #e9ecef",borderRadius:10,padding:"11px",fontWeight:500,fontSize:13,cursor:"pointer"}}>
-            Continuer avec les données locales
-          </button>}
-        </div>
-      </div>
-    );
-  }
-
   // Écran de connexion toujours affiché si pas de session active
   if(!session) return (
     <EcranConnexion
       onPatron={async(patron)=>{
         setSession({role:"patron", patron});
+        await logActivity(patron, "connexion", {});
       }}
       onVendeur={v=>setSession({role:"vendeur",vendeur:v})}
       vendeurs={data.vendeurs}
@@ -3406,24 +2797,10 @@ export default function App(){
   return (
     <AppPatron
       data={data}
-      setData={setData}
+      setData={d=>{ saveCache(d); saveAppDataToSupabase(d); setData(d); }}
       patron={session.patron}
-      onLogout={()=>setSession(null)}
+      onLogout={async()=>{ await logActivity(session.patron,"deconnexion",{}); setSession(null); }}
     />
   );
 }
 
-// ─── EXPORTS POUR LES TESTS AUTOMATISÉS ───────────────────────────────────────
-// Ces exports nommés ne servent qu'au fichier de tests (tests/calculs.test.js)
-// — ils n'affectent en rien le fonctionnement de l'app en production, qui
-// continue d'utiliser `export default App` ci-dessus comme seul point d'entrée.
-// Objectif : permettre de vérifier automatiquement, à chaque mise à jour, que
-// les fonctions de calcul financier (répartition, marges, résultat net...)
-// continuent de produire les bons résultats — sans dupliquer leur code dans
-// un fichier séparé qui pourrait diverger silencieusement du vrai code.
-export {
-  n, montantCat, totalLabo, totalDirect, repartition, calcPDV, caDepuisClotures,
-  totalChargesDirectesPDV, ventilationCharges, topCharges, comparaisonSectorielle,
-  calculerRapprochement, extractKeyword, hashRow, moisLissage,
-  fillPdvKeys, initMois, ensureMois, GROUPES_COMPTA, PDV_LIST, REFERENCES_SECTORIELLES_DEFAUT,
-};
