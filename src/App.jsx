@@ -165,6 +165,7 @@ function initLocal(){
     vendeurs: [],
     objectifsSectoriels: JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
     projets: [],
+    recettes: [],
     active: key,
     mois: { [key]: initMois() }
   };
@@ -247,6 +248,9 @@ async function loadFromSupabase(){
       // Projets événementiels (onglet "🎯 Projets") — simulation + suivi réel.
       // Repris de la colonne app_data.projets déjà existante côté Supabase.
       projets: appRow.projets || [],
+      // Fiches food cost (onglet "🍽️ Food cost") — recettes avec ingrédients,
+      // rendement et prix de vente, pour calculer coût/marge au kilo.
+      recettes: appRow.recettes || [],
       active: key,
       mois: Object.keys(mois).length ? mois : { [key]: initMois() }
     };
@@ -266,6 +270,7 @@ async function saveAppDataToSupabase(data){
       vendeurs: data.vendeurs,
       objectifs_sectoriels: data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT,
       projets: data.projets || [],
+      recettes: data.recettes || [],
       active_mois: data.active,
       updated_at: new Date().toISOString()
     });
@@ -966,6 +971,61 @@ function genererPdfExport(ex){
     ${ex.classementPdv.map(ligneClassementPdv).join("")}
   </table>
 
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if(!w){ alert("Le navigateur a bloqué l'ouverture de la fenêtre d'impression. Autorisez les pop-ups pour ce site puis réessayez."); return; }
+  w.document.write(html);
+  w.document.close();
+  w.onload = ()=>{ w.focus(); w.print(); };
+}
+
+// Génère le PDF d'une fiche food cost, via impression navigateur (même
+// approche que genererPdfExport) — pensé pour être imprimé et rangé dans un
+// cahier de cuisine physique : mise en page simple, lisible, sans fioritures.
+function genererPdfFicheRecette(recette){
+  const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
+  const totalCout = (recette.ingredients||[]).reduce((s,i)=>s+n(i.cout),0);
+  const rendement = n(recette.rendementKg)||1;
+  const coutKg = totalCout/rendement;
+  const prixKg = n(recette.prixVenteKg);
+  const margeKg = prixKg-coutKg;
+  const margePct = prixKg>0 ? (margeKg/prixKg)*100 : 0;
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fiche food cost — ${recette.nom}</title>
+<style>
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#212529;padding:32px;max-width:700px;margin:0 auto;}
+  h1{font-size:22px;margin-bottom:2px;}
+  .sub{color:#6c757d;font-size:12px;margin-bottom:20px;}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;}
+  th{text-align:left;background:#f8f9fa;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6c757d;border-bottom:1px solid #e9ecef;}
+  td{padding:8px 10px;border-bottom:1px solid #f0f0f0;}
+  .num{text-align:right;font-weight:600;}
+  .total-row{font-weight:700;background:#f8f9fa;}
+  .synthese{display:flex;gap:14px;flex-wrap:wrap;margin:20px 0;}
+  .kpi{flex:1;min-width:130px;background:#f8f9fa;border-radius:8px;padding:14px;}
+  .kpi .label{font-size:10px;text-transform:uppercase;color:#6c757d;margin-bottom:4px;}
+  .kpi .val{font-size:18px;font-weight:700;color:#2d6a4f;}
+  .kpi .val.neg{color:#c1121f;}
+  @media print{ body{padding:0;} }
+</style></head><body>
+  <h1>🍽️ ${recette.nom}</h1>
+  <div class="sub">Fiche food cost · Rendement estimé : ${rendement.toLocaleString("fr-FR")} kg${recette.notes?` · ${recette.notes}`:""}</div>
+
+  <table>
+    <tr><th>Ingrédient</th><th>Quantité</th><th>Coût</th></tr>
+    ${(recette.ingredients||[]).map(i=>`<tr><td>${i.nom}</td><td>${i.quantite||""}</td><td class="num">${nb(n(i.cout))}</td></tr>`).join("")}
+    <tr class="total-row"><td colspan="2">Coût matière total</td><td class="num">${nb(totalCout)}</td></tr>
+  </table>
+
+  <div class="synthese">
+    <div class="kpi"><div class="label">Coût au kg</div><div class="val">${nb(coutKg)}</div></div>
+    <div class="kpi"><div class="label">Prix de vente au kg</div><div class="val">${nb(prixKg)}</div></div>
+    <div class="kpi"><div class="label">Marge au kg</div><div class="val ${margeKg<0?'neg':''}">${nb(margeKg)}</div></div>
+    <div class="kpi"><div class="label">Marge %</div><div class="val ${margePct<0?'neg':''}">${margePct.toFixed(1)}%</div></div>
+  </div>
+
+  <div class="sub">Généré le ${new Date().toLocaleDateString("fr-FR")} — Suivi Performance, Traiteur Grec</div>
 </body></html>`;
 
   const w = window.open("", "_blank");
@@ -3518,6 +3578,237 @@ function PanneauProjets({data, moisData, onUpdateMois, onUpdateData}){
   </div>;
 }
 
+// ─── FOOD COST (fiches techniques de recettes) ────────────────────────────────
+// Permet de créer des fiches simples (ingrédients + coûts + rendement + prix
+// de vente au kg) pour calculer instantanément le coût matière, la marge en €
+// et en % de chaque plat vendu au poids. Toute modification d'un ingrédient
+// recalcule immédiatement la marge affichée (état local React, pas besoin de
+// sauvegarder pour voir l'effet) — pensé comme un outil de simulation rapide,
+// pas un flux de données continu. Export PDF pour impression et classement
+// dans un cahier de cuisine. Ne couvre pas le coût de main-d'œuvre ni le
+// croisement avec les volumes de vente (hors périmètre pour l'instant).
+function RecetteForm({recette, onSave, onCancel}){
+  const [nom,setNom]=useState(recette?.nom||"");
+  const [notes,setNotes]=useState(recette?.notes||"");
+  const [rendementKg,setRendementKg]=useState(recette?.rendementKg||"");
+  const [prixVenteKg,setPrixVenteKg]=useState(recette?.prixVenteKg||"");
+  const [ingredients,setIngredients]=useState(recette?.ingredients||[]);
+  const [ingForm,setIngForm]=useState({nom:"",quantite:"",cout:""});
+
+  // Recalcul instantané — pas de sauvegarde nécessaire pour voir l'effet
+  // d'un changement d'ingrédient, de rendement ou de prix de vente.
+  const totalCout = ingredients.reduce((s,i)=>s+n(i.cout),0);
+  const rendement = n(rendementKg);
+  const coutKg = rendement>0 ? totalCout/rendement : 0;
+  const prixKg = n(prixVenteKg);
+  const margeKg = prixKg-coutKg;
+  const margePct = prixKg>0 ? (margeKg/prixKg)*100 : 0;
+
+  const ajouterIngredient=()=>{
+    if(!ingForm.nom.trim()||!n(ingForm.cout)) return;
+    setIngredients(ings=>[...ings,{id:uid(),nom:ingForm.nom,quantite:ingForm.quantite,cout:n(ingForm.cout)}]);
+    setIngForm({nom:"",quantite:"",cout:""});
+  };
+  const updIngredient=(id,field,val)=>setIngredients(ings=>ings.map(i=>i.id===id?{...i,[field]:val}:i));
+  const supprimerIngredient=(id)=>setIngredients(ings=>ings.filter(i=>i.id!==id));
+
+  const save=()=>{
+    if(!nom.trim()) return;
+    onSave({
+      ...(recette||{}),
+      id: recette?.id||uid(),
+      nom, notes,
+      rendementKg: n(rendementKg),
+      prixVenteKg: n(prixVenteKg),
+      ingredients,
+      createdAt: recette?.createdAt||new Date().toISOString(),
+    });
+  };
+
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <SectionHead>📋 Informations du plat</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div><Label>Nom du plat</Label>
+          <input value={nom} onChange={e=>setNom(e.target.value)} placeholder="Ex: Moussaka, Tzatziki..."
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><Label>Rendement estimé (kg produit fini)</Label>
+            <div style={{position:"relative"}}>
+              <input type="number" min="0" step="0.1" value={rendementKg} onChange={e=>setRendementKg(e.target.value)} placeholder="0"
+                style={{...base,width:"100%",padding:"9px 30px 9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13}}>kg</span>
+            </div>
+          </div>
+          <div><Label>Prix de vente au kg</Label>
+            <div style={{position:"relative"}}>
+              <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13}}>€</span>
+              <input type="number" min="0" step="0.01" value={prixVenteKg} onChange={e=>setPrixVenteKg(e.target.value)} placeholder="0"
+                style={{...base,width:"100%",padding:"9px 12px 9px 26px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:11}}>/kg</span>
+            </div>
+          </div>
+        </div>
+        <div><Label>Notes (optionnel)</Label>
+          <input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Ex: rendement estimé sur fournée type du 12/07..."
+            style={{...base,width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/></div>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:16}}>
+      <SectionHead>🧂 Ingrédients</SectionHead>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
+        {ingredients.map(ing=>(
+          <div key={ing.id} style={{display:"grid",gridTemplateColumns:"1fr 90px 100px auto",gap:8,alignItems:"center",background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+            <input value={ing.nom} onChange={e=>updIngredient(ing.id,"nom",e.target.value)}
+              style={{...base,border:"none",background:"transparent",outline:"none",fontSize:13,fontWeight:500,minWidth:0}}/>
+            <input value={ing.quantite} onChange={e=>updIngredient(ing.id,"quantite",e.target.value)} placeholder="Qté"
+              style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",fontSize:12,outline:"none",width:"100%"}}/>
+            <div style={{position:"relative"}}>
+              <input type="number" min="0" step="0.01" value={ing.cout} onChange={e=>updIngredient(ing.id,"cout",e.target.value)}
+                style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 20px 5px 8px",fontSize:12,outline:"none",width:"100%"}}/>
+              <span style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:10}}>€</span>
+            </div>
+            <button onClick={()=>supprimerIngredient(ing.id)} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:6,padding:"5px 8px",cursor:"pointer",fontSize:12}}>×</button>
+          </div>
+        ))}
+        {ingredients.length===0 && <div style={{fontSize:12,color:C.textLight,textAlign:"center",padding:"12px 0"}}>Aucun ingrédient ajouté</div>}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 90px 100px auto",gap:8,alignItems:"end",background:C.bg,borderRadius:8,padding:10}}>
+        <div><Label>Ingrédient</Label>
+          <input value={ingForm.nom} onChange={e=>setIngForm({...ingForm,nom:e.target.value})} placeholder="Ex: Viande hachée"
+            style={{...base,width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
+        <div><Label>Qté</Label>
+          <input value={ingForm.quantite} onChange={e=>setIngForm({...ingForm,quantite:e.target.value})} placeholder="500g"
+            style={{...base,width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
+        <div><Label>Coût</Label>
+          <div style={{position:"relative"}}>
+            <input type="number" min="0" step="0.01" value={ingForm.cout} onChange={e=>setIngForm({...ingForm,cout:e.target.value})} placeholder="0"
+              style={{...base,width:"100%",padding:"7px 20px 7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/>
+            <span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:10}}>€</span>
+          </div>
+        </div>
+        <button onClick={ajouterIngredient} disabled={!ingForm.nom.trim()||!n(ingForm.cout)}
+          style={{...base,background:ingForm.nom.trim()&&n(ingForm.cout)?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:6,padding:"8px 12px",fontWeight:600,cursor:"pointer",fontSize:12}}>+</button>
+      </div>
+    </Card>
+
+    {/* Résultat en temps réel — se recalcule à chaque modification ci-dessus */}
+    <Card style={{background:margeKg>=0?C.primaryLight:C.redLight,marginBottom:16}} pad={16}>
+      <div style={{fontSize:11,fontWeight:700,color:C.textMuted,textTransform:"uppercase",marginBottom:10}}>📊 Résultat (mis à jour en temps réel)</div>
+      <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Coût matière total</div>
+          <div style={{fontSize:18,fontWeight:700}}>{totalCout.toLocaleString("fr-FR")} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Coût au kg</div>
+          <div style={{fontSize:18,fontWeight:700}}>{coutKg.toLocaleString("fr-FR",{maximumFractionDigits:2})} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Marge au kg</div>
+          <div style={{fontSize:22,fontWeight:800,color:margeKg>=0?C.green:C.red}}>{margeKg.toLocaleString("fr-FR",{maximumFractionDigits:2})} €</div></div>
+        <div><div style={{fontSize:11,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.6}}>Marge</div>
+          <div style={{fontSize:22,fontWeight:800,color:margeKg>=0?C.green:C.red}}>{margePct.toFixed(1)} %</div></div>
+      </div>
+      {rendement===0 && <div style={{fontSize:11,color:C.accent,marginTop:8}}>⚠️ Renseignez le rendement (kg) pour calculer le coût au kg.</div>}
+    </Card>
+
+    <div style={{display:"flex",gap:10}}>
+      <button onClick={onCancel} style={{...base,flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px",fontWeight:600,cursor:"pointer",color:C.textMuted}}>Annuler</button>
+      <button onClick={save} disabled={!nom.trim()}
+        style={{...base,flex:2,background:nom.trim()?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:10,padding:"12px",fontWeight:700,cursor:nom.trim()?"pointer":"not-allowed"}}>
+        Enregistrer la fiche
+      </button>
+    </div>
+  </div>;
+}
+
+function PanneauFoodCost({data, onUpdateData}){
+  const [vue,setVue]=useState("liste"); // liste | nouveau | edition
+  const [recetteEditId,setRecetteEditId]=useState(null);
+  const recettes = data.recettes||[];
+  const recetteEdit = recettes.find(r=>r.id===recetteEditId)||null;
+
+  // CORRECTIF ANTI-ÉCRASEMENT : sauvegarde via onUpdateData (= updData dans
+  // AppPatron), qui recharge Supabase juste avant d'écrire.
+  const sauvegarder=(r)=>{
+    onUpdateData(fresh=>{
+      const freshRecettes = fresh.recettes||[];
+      const idx=freshRecettes.findIndex(x=>x.id===r.id);
+      const newList = idx>=0 ? freshRecettes.map(x=>x.id===r.id?r:x) : [...freshRecettes,r];
+      return {...fresh, recettes:newList};
+    });
+    setVue("liste");
+  };
+  const supprimer=(id)=>{
+    onUpdateData(fresh=>({...fresh, recettes:(fresh.recettes||[]).filter(r=>r.id!==id)}));
+  };
+
+  if(vue==="nouveau") return <RecetteForm onSave={sauvegarder} onCancel={()=>setVue("liste")}/>;
+  if(vue==="edition"&&recetteEdit) return <RecetteForm recette={recetteEdit} onSave={sauvegarder} onCancel={()=>setVue("liste")}/>;
+
+  return <div>
+    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
+      <div style={{fontSize:12,color:C.textMuted}}>
+        Créez des fiches techniques pour connaître le coût et la marge de chaque plat vendu au poids. Modifiez un ingrédient pour voir instantanément l'effet sur la rentabilité, puis exportez en PDF pour votre cahier de cuisine.
+      </div>
+    </Card>
+
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div style={{fontSize:13,color:C.textMuted}}>{recettes.length} fiche(s) enregistrée(s)</div>
+      <button onClick={()=>setVue("nouveau")} style={{...base,background:C.primary,color:"#fff",border:"none",borderRadius:10,padding:"10px 18px",fontWeight:700,cursor:"pointer"}}>
+        + Nouvelle fiche
+      </button>
+    </div>
+
+    {recettes.length===0 && <Card pad={32} style={{textAlign:"center"}}>
+      <div style={{fontSize:40,marginBottom:12}}>🍽️</div>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:6}}>Aucune fiche</div>
+      <div style={{fontSize:13,color:C.textMuted}}>Créez votre première fiche food cost pour calculer la rentabilité d'un plat.</div>
+    </Card>}
+
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {[...recettes].sort((a,b)=>{
+        const margeA = n(a.prixVenteKg) - ((a.ingredients||[]).reduce((s,i)=>s+n(i.cout),0)/(n(a.rendementKg)||1));
+        const margeB = n(b.prixVenteKg) - ((b.ingredients||[]).reduce((s,i)=>s+n(i.cout),0)/(n(b.rendementKg)||1));
+        return margeB-margeA;
+      }).map(r=>{
+        const totalCout = (r.ingredients||[]).reduce((s,i)=>s+n(i.cout),0);
+        const rendement = n(r.rendementKg)||1;
+        const coutKg = totalCout/rendement;
+        const prixKg = n(r.prixVenteKg);
+        const margeKg = prixKg-coutKg;
+        const margePct = prixKg>0 ? (margeKg/prixKg)*100 : 0;
+        return <Card key={r.id} pad={16}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+            <div style={{flex:1,cursor:"pointer"}} onClick={()=>{setRecetteEditId(r.id);setVue("edition");}}>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>{r.nom}</div>
+              <div style={{fontSize:12,color:C.textMuted}}>
+                {n(r.rendementKg)>0?`${n(r.rendementKg).toLocaleString("fr-FR")} kg · `:""}
+                Coût {coutKg.toLocaleString("fr-FR",{maximumFractionDigits:2})} €/kg · Vente {prixKg.toLocaleString("fr-FR",{maximumFractionDigits:2})} €/kg
+              </div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontSize:18,fontWeight:800,color:margeKg>=0?C.green:C.red}}>{margePct.toFixed(0)}%</div>
+              <div style={{fontSize:11,color:C.textMuted}}>marge</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:12,justifyContent:"flex-end"}}>
+            <button onClick={()=>genererPdfFicheRecette(r)}
+              style={{...base,background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:500}}>
+              📄 PDF
+            </button>
+            <button onClick={()=>{setRecetteEditId(r.id);setVue("edition");}}
+              style={{...base,background:C.primaryLight,color:C.primary,border:"none",borderRadius:7,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:600}}>
+              ✏️ Modifier
+            </button>
+            <button onClick={()=>{if(window.confirm("Supprimer cette fiche ?"))supprimer(r.id);}}
+              style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:7,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:600}}>
+              Suppr.
+            </button>
+          </div>
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
 // ─── MON COMPTE (changement de mot de passe) ─────────────────────────────────
 function MonCompte({patron, onLogout}){
   const [pwd,setPwd]=useState("");
@@ -3633,6 +3924,7 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
     {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
     {id:"projets",label:"Projets",icon:"🎪"},
+    {id:"foodcost",label:"Food cost",icon:"🍽️"},
     {id:"export",label:"Export",icon:"📄"},
     {id:"caisse",label:"Contrôle caisse",icon:"🏦"},
     {id:"rapprochement",label:"Rapprochement",icon:"🔍"},
@@ -3700,7 +3992,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="projets"?"🎪 Projets":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="projets"?"🎪 Projets":page==="foodcost"?"🍽️ Food cost":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -3714,6 +4006,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
         {page==="objectifs"&&<GestionObjectifs objectifs={data.objectifsSectoriels} onChange={o=>updData(fresh=>({...fresh,objectifsSectoriels:o}))}/>}
         {page==="projets"&&<PanneauProjets data={data} moisData={md} onUpdateMois={upd} onUpdateData={updData}/>}
+        {page==="foodcost"&&<PanneauFoodCost data={data} onUpdateData={updData}/>}
         {page==="export"&&<PanneauExport data={data}/>}
         {page==="caisse"&&<ControleCaisse moisData={md} paiements={data.paiements}/>}
         {page==="rapprochement"&&<PanneauRapprochement moisData={md}/>}
