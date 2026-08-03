@@ -610,6 +610,25 @@ const n = v => parseFloat(v)||0;
 // selon l'unité choisie). Centralisé ici pour rester cohérent entre le
 // formulaire de fiche, la liste des fiches, et l'export PDF.
 function coutIngredient(ing){ return n(ing.quantite) * n(ing.prixUnitaire); }
+// Recalcule une recette entière (quantités de tous les ingrédients + rendement)
+// proportionnellement à une nouvelle quantité donnée pour UN ingrédient de
+// référence — ex: "je n'ai que 4kg de yaourt au lieu des 10kg de la recette".
+// Le coût au kg et la marge ne changent PAS (ce sont des ratios, indépendants
+// de l'échelle) ; seuls les quantités absolues, le coût total et le rendement
+// sont recalculés. Ne modifie jamais la fiche d'origine — calcul à la volée.
+function recalculerRecetteEchelle(recette, refIngredientId, nouvelleQuantite){
+  const refIng = (recette.ingredients||[]).find(i=>i.id===refIngredientId);
+  const qteRef = n(refIng?.quantite);
+  if(!refIng || qteRef<=0) return null;
+  const facteur = n(nouvelleQuantite) / qteRef;
+  const ingredientsAjustes = (recette.ingredients||[]).map(i=>({
+    ...i,
+    quantite: n(i.quantite)*facteur,
+  }));
+  const rendementAjuste = n(recette.rendementKg)*facteur;
+  const totalCoutAjuste = ingredientsAjustes.reduce((s,i)=>s+coutIngredient(i),0);
+  return { ingredientsAjustes, rendementAjuste, totalCoutAjuste, facteur };
+}
 function montantCat(cat, vars){ 
   return cat.type==="fixe" 
     ? n(cat.montantFixe) + n(vars?.[cat.id])
@@ -3743,6 +3762,71 @@ function RecetteForm({recette, onSave, onCancel}){
   </div>;
 }
 
+// Outil de recalcul à l'échelle — permet de voir la recette ajustée à une
+// quantité réellement disponible pour un ingrédient (ex: "je n'ai que 4kg de
+// yaourt au lieu des 10kg prévus"). Purement un affichage temporaire : rien
+// n'est jamais sauvegardé, la fiche d'origine reste inchangée.
+function RecetteEchelleTool({recette}){
+  const [ouvert,setOuvert]=useState(false);
+  const [refId,setRefId]=useState(recette.ingredients?.[0]?.id||"");
+  const [nouvelleQte,setNouvelleQte]=useState("");
+
+  const resultat = (n(nouvelleQte)>0 && refId) ? recalculerRecetteEchelle(recette, refId, nouvelleQte) : null;
+  const rendementOrig = n(recette.rendementKg)||1;
+  const coutKgOrig = ((recette.ingredients||[]).reduce((s,i)=>s+coutIngredient(i),0))/rendementOrig;
+
+  const imprimerAjuste=()=>{
+    if(!resultat) return;
+    genererPdfFicheRecette({
+      ...recette,
+      nom: `${recette.nom} (ajustée)`,
+      notes: `Recalculée pour ${n(nouvelleQte).toLocaleString("fr-FR")} ${recette.ingredients.find(i=>i.id===refId)?.unite==="piece"?"pièce(s)":(recette.ingredients.find(i=>i.id===refId)?.unite||"kg")} de ${recette.ingredients.find(i=>i.id===refId)?.nom||""} · ${recette.notes||""}`.trim(),
+      rendementKg: resultat.rendementAjuste,
+      ingredients: resultat.ingredientsAjustes,
+    });
+  };
+
+  return <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+    <button onClick={()=>setOuvert(o=>!o)}
+      style={{...base,background:"none",border:"none",cursor:"pointer",color:C.fixe,fontSize:12,fontWeight:600,padding:0,display:"flex",alignItems:"center",gap:4}}>
+      🔢 Recalculer pour une quantité {ouvert?"▲":"▼"}
+    </button>
+    {ouvert && <div style={{marginTop:10,background:C.fixeLight,borderRadius:8,padding:12}}>
+      <div style={{fontSize:11,color:C.textMuted,marginBottom:10}}>Choisissez un ingrédient de référence et la quantité réellement disponible — toutes les autres quantités et le rendement seront ajustés proportionnellement. Rien n'est sauvegardé.</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 100px",gap:8,marginBottom:10}}>
+        <div><Label>Ingrédient de référence</Label>
+          <select value={refId} onChange={e=>setRefId(e.target.value)}
+            style={{...base,width:"100%",padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}>
+            {(recette.ingredients||[]).map(i=><option key={i.id} value={i.id}>{i.nom} ({n(i.quantite).toLocaleString("fr-FR")} {i.unite==="piece"?"pièce":i.unite})</option>)}
+          </select></div>
+        <div><Label>Quantité dispo</Label>
+          <input type="number" min="0" step="0.01" value={nouvelleQte} onChange={e=>setNouvelleQte(e.target.value)} placeholder="0"
+            style={{...base,width:"100%",padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
+      </div>
+
+      {resultat && <div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textMuted,textTransform:"uppercase",marginBottom:6}}>Quantités ajustées (facteur ×{resultat.facteur.toLocaleString("fr-FR",{maximumFractionDigits:2})})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:10}}>
+          {resultat.ingredientsAjustes.map(i=>(
+            <div key={i.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,background:C.white,borderRadius:6,padding:"5px 10px"}}>
+              <span>{i.nom}</span>
+              <strong>{n(i.quantite).toLocaleString("fr-FR",{maximumFractionDigits:2})} {i.unite==="piece"?"pièce":i.unite}</strong>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:10,background:C.white,borderRadius:8,padding:10,marginBottom:10}}>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Rendement ajusté</div><div style={{fontSize:14,fontWeight:700}}>{resultat.rendementAjuste.toLocaleString("fr-FR",{maximumFractionDigits:2})} kg</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Coût total ajusté</div><div style={{fontSize:14,fontWeight:700}}>{resultat.totalCoutAjuste.toLocaleString("fr-FR",{maximumFractionDigits:2})} €</div></div>
+          <div><div style={{fontSize:10,color:C.textMuted}}>Coût au kg</div><div style={{fontSize:14,fontWeight:700}}>{coutKgOrig.toLocaleString("fr-FR",{maximumFractionDigits:2})} € <span style={{fontSize:9,color:C.textLight}}>(inchangé)</span></div></div>
+        </div>
+        <button onClick={imprimerAjuste} style={{...base,background:C.fixe,color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontWeight:600,cursor:"pointer",fontSize:12}}>
+          📄 Imprimer cette version ajustée
+        </button>
+      </div>}
+    </div>}
+  </div>;
+}
+
 function PanneauFoodCost({data, onUpdateData}){
   const [vue,setVue]=useState("liste"); // liste | nouveau | edition
   const [recetteEditId,setRecetteEditId]=useState(null);
@@ -3827,6 +3911,7 @@ function PanneauFoodCost({data, onUpdateData}){
               Suppr.
             </button>
           </div>
+          {(r.ingredients||[]).length>0 && <RecetteEchelleTool recette={r}/>}
         </Card>;
       })}
     </div>
