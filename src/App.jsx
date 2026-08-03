@@ -606,6 +606,10 @@ async function updatePatronPassword(patronId, newPassword){
 
 // ─── CALCULS ──────────────────────────────────────────────────────────────────
 const n = v => parseFloat(v)||0;
+// Coût d'une ligne d'ingrédient = quantité × prix unitaire (€/kg, €/L ou €/pièce
+// selon l'unité choisie). Centralisé ici pour rester cohérent entre le
+// formulaire de fiche, la liste des fiches, et l'export PDF.
+function coutIngredient(ing){ return n(ing.quantite) * n(ing.prixUnitaire); }
 function montantCat(cat, vars){ 
   return cat.type==="fixe" 
     ? n(cat.montantFixe) + n(vars?.[cat.id])
@@ -985,7 +989,7 @@ function genererPdfExport(ex){
 // cahier de cuisine physique : mise en page simple, lisible, sans fioritures.
 function genererPdfFicheRecette(recette){
   const nb = v => v.toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
-  const totalCout = (recette.ingredients||[]).reduce((s,i)=>s+n(i.cout),0);
+  const totalCout = (recette.ingredients||[]).reduce((s,i)=>s+coutIngredient(i),0);
   const rendement = n(recette.rendementKg)||1;
   const coutKg = totalCout/rendement;
   const prixKg = n(recette.prixVenteKg);
@@ -1013,9 +1017,12 @@ function genererPdfFicheRecette(recette){
   <div class="sub">Fiche food cost · Rendement estimé : ${rendement.toLocaleString("fr-FR")} kg${recette.notes?` · ${recette.notes}`:""}</div>
 
   <table>
-    <tr><th>Ingrédient</th><th>Quantité</th><th>Coût</th></tr>
-    ${(recette.ingredients||[]).map(i=>`<tr><td>${i.nom}</td><td>${i.quantite||""}</td><td class="num">${nb(n(i.cout))}</td></tr>`).join("")}
-    <tr class="total-row"><td colspan="2">Coût matière total</td><td class="num">${nb(totalCout)}</td></tr>
+    <tr><th>Ingrédient</th><th>Quantité</th><th>Prix unitaire</th><th>Coût</th></tr>
+    ${(recette.ingredients||[]).map(i=>{
+      const uniteLbl = i.unite==="piece"?"pièce":(i.unite||"kg");
+      return `<tr><td>${i.nom}</td><td>${n(i.quantite).toLocaleString("fr-FR")} ${uniteLbl}</td><td>${nb(n(i.prixUnitaire))}/${uniteLbl}</td><td class="num">${nb(coutIngredient(i))}</td></tr>`;
+    }).join("")}
+    <tr class="total-row"><td colspan="3">Coût matière total</td><td class="num">${nb(totalCout)}</td></tr>
   </table>
 
   <div class="synthese">
@@ -3593,11 +3600,17 @@ function RecetteForm({recette, onSave, onCancel}){
   const [rendementKg,setRendementKg]=useState(recette?.rendementKg||"");
   const [prixVenteKg,setPrixVenteKg]=useState(recette?.prixVenteKg||"");
   const [ingredients,setIngredients]=useState(recette?.ingredients||[]);
-  const [ingForm,setIngForm]=useState({nom:"",quantite:"",cout:""});
+  const [ingForm,setIngForm]=useState({nom:"",quantite:"",unite:"kg",prixUnitaire:""});
+
+  const UNITES = [["kg","kg"],["L","L"],["piece","pièce"]];
+  const uniteLabel = u => UNITES.find(([v])=>v===u)?.[1] || u;
 
   // Recalcul instantané — pas de sauvegarde nécessaire pour voir l'effet
-  // d'un changement d'ingrédient, de rendement ou de prix de vente.
-  const totalCout = ingredients.reduce((s,i)=>s+n(i.cout),0);
+  // d'un changement d'ingrédient, de rendement ou de prix de vente. Chaque
+  // ligne se calcule via coutIngredient (quantité × prix unitaire), donc une
+  // hausse de prix fournisseur (ex: aubergines en hiver) se répercute
+  // automatiquement sans devoir recalculer le coût total à la main.
+  const totalCout = ingredients.reduce((s,i)=>s+coutIngredient(i),0);
   const rendement = n(rendementKg);
   const coutKg = rendement>0 ? totalCout/rendement : 0;
   const prixKg = n(prixVenteKg);
@@ -3605,9 +3618,9 @@ function RecetteForm({recette, onSave, onCancel}){
   const margePct = prixKg>0 ? (margeKg/prixKg)*100 : 0;
 
   const ajouterIngredient=()=>{
-    if(!ingForm.nom.trim()||!n(ingForm.cout)) return;
-    setIngredients(ings=>[...ings,{id:uid(),nom:ingForm.nom,quantite:ingForm.quantite,cout:n(ingForm.cout)}]);
-    setIngForm({nom:"",quantite:"",cout:""});
+    if(!ingForm.nom.trim()||!n(ingForm.quantite)||!n(ingForm.prixUnitaire)) return;
+    setIngredients(ings=>[...ings,{id:uid(),nom:ingForm.nom,quantite:n(ingForm.quantite),unite:ingForm.unite,prixUnitaire:n(ingForm.prixUnitaire)}]);
+    setIngForm({...ingForm,nom:"",quantite:"",prixUnitaire:""});
   };
   const updIngredient=(id,field,val)=>setIngredients(ings=>ings.map(i=>i.id===id?{...i,[field]:val}:i));
   const supprimerIngredient=(id)=>setIngredients(ings=>ings.filter(i=>i.id!==id));
@@ -3659,37 +3672,48 @@ function RecetteForm({recette, onSave, onCancel}){
       <SectionHead>🧂 Ingrédients</SectionHead>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
         {ingredients.map(ing=>(
-          <div key={ing.id} style={{display:"grid",gridTemplateColumns:"1fr 90px 100px auto",gap:8,alignItems:"center",background:C.bg,borderRadius:8,padding:"8px 10px"}}>
+          <div key={ing.id} style={{display:"grid",gridTemplateColumns:"1fr 70px 60px 90px 70px auto",gap:6,alignItems:"center",background:C.bg,borderRadius:8,padding:"8px 10px"}}>
             <input value={ing.nom} onChange={e=>updIngredient(ing.id,"nom",e.target.value)}
               style={{...base,border:"none",background:"transparent",outline:"none",fontSize:13,fontWeight:500,minWidth:0}}/>
-            <input value={ing.quantite} onChange={e=>updIngredient(ing.id,"quantite",e.target.value)} placeholder="Qté"
+            <input type="number" min="0" step="0.01" value={ing.quantite} onChange={e=>updIngredient(ing.id,"quantite",e.target.value)} placeholder="Qté"
               style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",fontSize:12,outline:"none",width:"100%"}}/>
+            <select value={ing.unite} onChange={e=>updIngredient(ing.id,"unite",e.target.value)}
+              style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 4px",fontSize:11,outline:"none",width:"100%"}}>
+              {UNITES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
             <div style={{position:"relative"}}>
-              <input type="number" min="0" step="0.01" value={ing.cout} onChange={e=>updIngredient(ing.id,"cout",e.target.value)}
-                style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 20px 5px 8px",fontSize:12,outline:"none",width:"100%"}}/>
-              <span style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:10}}>€</span>
+              <input type="number" min="0" step="0.01" value={ing.prixUnitaire} onChange={e=>updIngredient(ing.id,"prixUnitaire",e.target.value)}
+                style={{...base,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 16px 5px 8px",fontSize:12,outline:"none",width:"100%"}}/>
+              <span style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:9}}>€</span>
             </div>
+            <div style={{fontSize:12,fontWeight:700,textAlign:"right",color:C.primary}}>{coutIngredient(ing).toLocaleString("fr-FR",{maximumFractionDigits:2})}€</div>
             <button onClick={()=>supprimerIngredient(ing.id)} style={{...base,background:C.redLight,color:C.red,border:"none",borderRadius:6,padding:"5px 8px",cursor:"pointer",fontSize:12}}>×</button>
           </div>
         ))}
         {ingredients.length===0 && <div style={{fontSize:12,color:C.textLight,textAlign:"center",padding:"12px 0"}}>Aucun ingrédient ajouté</div>}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 90px 100px auto",gap:8,alignItems:"end",background:C.bg,borderRadius:8,padding:10}}>
+      <div style={{fontSize:10,color:C.textLight,marginBottom:8,paddingLeft:2}}>Coût de la ligne = Quantité × Prix unitaire — modifiez le prix unitaire pour répercuter automatiquement une variation de tarif fournisseur.</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 70px 60px 90px auto",gap:6,alignItems:"end",background:C.bg,borderRadius:8,padding:10}}>
         <div><Label>Ingrédient</Label>
-          <input value={ingForm.nom} onChange={e=>setIngForm({...ingForm,nom:e.target.value})} placeholder="Ex: Viande hachée"
+          <input value={ingForm.nom} onChange={e=>setIngForm({...ingForm,nom:e.target.value})} placeholder="Ex: Aubergines"
             style={{...base,width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
         <div><Label>Qté</Label>
-          <input value={ingForm.quantite} onChange={e=>setIngForm({...ingForm,quantite:e.target.value})} placeholder="500g"
+          <input type="number" min="0" step="0.01" value={ingForm.quantite} onChange={e=>setIngForm({...ingForm,quantite:e.target.value})} placeholder="2"
             style={{...base,width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/></div>
-        <div><Label>Coût</Label>
+        <div><Label>Unité</Label>
+          <select value={ingForm.unite} onChange={e=>setIngForm({...ingForm,unite:e.target.value})}
+            style={{...base,width:"100%",padding:"7px 4px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:11}}>
+            {UNITES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+          </select></div>
+        <div><Label>Prix / {uniteLabel(ingForm.unite)}</Label>
           <div style={{position:"relative"}}>
-            <input type="number" min="0" step="0.01" value={ingForm.cout} onChange={e=>setIngForm({...ingForm,cout:e.target.value})} placeholder="0"
-              style={{...base,width:"100%",padding:"7px 20px 7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/>
-            <span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:10}}>€</span>
+            <input type="number" min="0" step="0.01" value={ingForm.prixUnitaire} onChange={e=>setIngForm({...ingForm,prixUnitaire:e.target.value})} placeholder="0"
+              style={{...base,width:"100%",padding:"7px 18px 7px 10px",borderRadius:6,border:`1px solid ${C.border}`,outline:"none",fontSize:12}}/>
+            <span style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:10}}>€</span>
           </div>
         </div>
-        <button onClick={ajouterIngredient} disabled={!ingForm.nom.trim()||!n(ingForm.cout)}
-          style={{...base,background:ingForm.nom.trim()&&n(ingForm.cout)?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:6,padding:"8px 12px",fontWeight:600,cursor:"pointer",fontSize:12}}>+</button>
+        <button onClick={ajouterIngredient} disabled={!ingForm.nom.trim()||!n(ingForm.quantite)||!n(ingForm.prixUnitaire)}
+          style={{...base,background:ingForm.nom.trim()&&n(ingForm.quantite)&&n(ingForm.prixUnitaire)?C.primary:"#ccc",color:"#fff",border:"none",borderRadius:6,padding:"8px 12px",fontWeight:600,cursor:"pointer",fontSize:12}}>+</button>
       </div>
     </Card>
 
@@ -3765,11 +3789,11 @@ function PanneauFoodCost({data, onUpdateData}){
 
     <div style={{display:"flex",flexDirection:"column",gap:10}}>
       {[...recettes].sort((a,b)=>{
-        const margeA = n(a.prixVenteKg) - ((a.ingredients||[]).reduce((s,i)=>s+n(i.cout),0)/(n(a.rendementKg)||1));
-        const margeB = n(b.prixVenteKg) - ((b.ingredients||[]).reduce((s,i)=>s+n(i.cout),0)/(n(b.rendementKg)||1));
+        const margeA = n(a.prixVenteKg) - ((a.ingredients||[]).reduce((s,i)=>s+coutIngredient(i),0)/(n(a.rendementKg)||1));
+        const margeB = n(b.prixVenteKg) - ((b.ingredients||[]).reduce((s,i)=>s+coutIngredient(i),0)/(n(b.rendementKg)||1));
         return margeB-margeA;
       }).map(r=>{
-        const totalCout = (r.ingredients||[]).reduce((s,i)=>s+n(i.cout),0);
+        const totalCout = (r.ingredients||[]).reduce((s,i)=>s+coutIngredient(i),0);
         const rendement = n(r.rendementKg)||1;
         const coutKg = totalCout/rendement;
         const prixKg = n(r.prixVenteKg);
