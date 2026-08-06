@@ -166,6 +166,9 @@ function initLocal(){
     objectifsSectoriels: JSON.parse(JSON.stringify(REFERENCES_SECTORIELLES_DEFAUT)),
     projets: [],
     recettes: [],
+    // Objectifs de panier moyen (€) par point de vente, utilisés pour le
+    // suivi des primes vendeurs (onglet "Récap vendeurs").
+    objectifsPM: {},
     active: key,
     mois: { [key]: initMois() }
   };
@@ -251,6 +254,8 @@ async function loadFromSupabase(){
       // Fiches food cost (onglet "🍽️ Food cost") — recettes avec ingrédients,
       // rendement et prix de vente, pour calculer coût/marge au kilo.
       recettes: appRow.recettes || [],
+      // Objectifs de panier moyen (€) par PDV, pour le suivi des primes vendeurs.
+      objectifsPM: appRow.objectifs_pm || {},
       active: key,
       mois: Object.keys(mois).length ? mois : { [key]: initMois() }
     };
@@ -271,6 +276,7 @@ async function saveAppDataToSupabase(data){
       objectifs_sectoriels: data.objectifsSectoriels || REFERENCES_SECTORIELLES_DEFAUT,
       projets: data.projets || [],
       recettes: data.recettes || [],
+      objectifs_pm: data.objectifsPM || {},
       active_mois: data.active,
       updated_at: new Date().toISOString()
     });
@@ -769,9 +775,39 @@ function comparaisonSectorielle(data, moisObj, tCA){
   return rows;
 }
 
-// ─── EXPORT MENSUEL (CSV / PDF) ────────────────────────────────────────────────
-// Assemble toutes les données d'un mois donné (charges détaillées par
-// sous-catégorie labo + chaque PDV, encaissements par PDV et mode de
+// ─── RÉCAP VENDEURS (panier moyen, primes) ────────────────────────────────────
+// Calcule, pour un mois donné, le détail par vendeur ET par PDV (un vendeur
+// peut tourner sur plusieurs points de vente) : nombre de clôtures, nombre de
+// fois où le panier moyen déclaré a dépassé l'objectif du PDV, CA généré —
+// plus un total global par vendeur (tous PDV confondus). Ne prend en compte
+// que les clôtures où le vendeur a renseigné un panier moyen ce jour-là.
+function calculerRecapVendeurs(moisObj, objectifsPM){
+  const parVendeur = {}; // { vendeurNom: { parPdv: {pdvId: {...}}, global: {...} } }
+
+  PDV_LIST.forEach(p=>{
+    const objectif = n(objectifsPM?.[p.id]);
+    (moisObj.pdv[p.id]?.clotures||[]).forEach(cl=>{
+      if(cl.panierMoyen===null || cl.panierMoyen===undefined) return; // pas renseigné ce jour-là
+      const vNom = cl.vendeurNom||"Inconnu";
+      if(!parVendeur[vNom]) parVendeur[vNom] = { parPdv:{}, global:{ nbClotures:0, nbDepassements:0, ca:0 } };
+      if(!parVendeur[vNom].parPdv[p.id]) parVendeur[vNom].parPdv[p.id] = { pdvNom:p.nom, pdvEmoji:p.emoji, objectif, nbClotures:0, nbDepassements:0, ca:0 };
+
+      const entry = parVendeur[vNom].parPdv[p.id];
+      entry.nbClotures += 1;
+      entry.ca += n(cl.total);
+      if(objectif>0 && n(cl.panierMoyen)>=objectif) entry.nbDepassements += 1;
+
+      parVendeur[vNom].global.nbClotures += 1;
+      parVendeur[vNom].global.ca += n(cl.total);
+      if(objectif>0 && n(cl.panierMoyen)>=objectif) parVendeur[vNom].global.nbDepassements += 1;
+    });
+  });
+
+  return Object.entries(parVendeur)
+    .map(([vendeurNom, v])=>({ vendeurNom, ...v, parPdvList: Object.values(v.parPdv) }))
+    .sort((a,b)=>b.global.ca-a.global.ca);
+}
+
 // paiement, événementiel, dépenses manuelles) avec leur % du CA, pour
 // analyse. Reprend simplement les montants déjà lissés tels que stockés
 // (le lissage éventuel a déjà été appliqué au moment de l'import CSV).
@@ -1231,6 +1267,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
   const [note,setNote]=useState("");
   const [depenses,setDepenses]=useState([]); // dépenses ajoutées par le vendeur, n'affectent pas le CA
   const [depForm,setDepForm]=useState({montant:"",modeId:"",scope:"pdv",catId:""});
+  const [panierMoyen,setPanierMoyen]=useState("");
 
   const [saving,setSaving]=useState(false);
   const [saveError,setSaveError]=useState(null);
@@ -1244,6 +1281,7 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
     setPdvId(id);
     setModes(data.paiements.map(p=>({...p,montant:0})));
     setDepenses([]);
+    setPanierMoyen("");
     setDepForm({
       montant:"",
       modeId:data.paiements[0]?.id||"",
@@ -1296,7 +1334,8 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
     const cloture={
       id:uid(), vendeurId:vendeur.id, vendeurNom:vendeur.nom,
       pdvId, date:todayKey(), dateLabel:new Date().toLocaleDateString("fr-FR"),
-      modes:modes.map(m=>({...m})), total, note
+      modes:modes.map(m=>({...m})), total, note,
+      panierMoyen: n(panierMoyen)>0 ? n(panierMoyen) : null,
     };
     let mois = d.mois[key];
     const old = mois.pdv[pdvId] || {ca:0,vars:{},clotures:[]};
@@ -1417,6 +1456,11 @@ function EcranVendeur({vendeur, data, onSave, onLogout}){
               <MoneyInput value={m.montant} onChange={v=>setModes(ms=>ms.map((x,j)=>j===i?{...x,montant:v}:x))}/>
             </div>
           ))}
+          <div style={{marginBottom:14}}>
+            <Label>Panier moyen du jour (optionnel)</Label>
+            <MoneyInput value={panierMoyen} onChange={setPanierMoyen}/>
+            {n(data.objectifsPM?.[pdvId])>0 && <div style={{fontSize:11,color:C.textMuted,marginTop:4}}>🎯 Objectif de ce point de vente : {n(data.objectifsPM[pdvId]).toLocaleString("fr-FR")} €</div>}
+          </div>
           <div style={{marginTop:8}}>
             <Label>Note (optionnel)</Label>
             <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Météo, événement, incident..."
@@ -3827,6 +3871,137 @@ function RecetteEchelleTool({recette}){
   </div>;
 }
 
+// ─── RÉCAP VENDEURS (objectifs de panier moyen + suivi des primes) ───────────
+// Deux sous-vues : 1) fixer l'objectif de panier moyen (€) pour chaque PDV,
+// 2) consulter le récap mensuel détaillé par vendeur et par PDV — nombre de
+// clôtures où l'objectif a été dépassé, et CA généré — pour objectiver
+// l'attribution des primes sur panier moyen.
+function PanneauRecapVendeurs({data, onUpdateData}){
+  const [sousVue,setSousVue]=useState("recap"); // recap | objectifs
+  const [moisChoisi,setMoisChoisi]=useState(data.active);
+  const moisDisponibles = Object.keys(data.mois).sort().reverse();
+  const moisObj = fillPdvKeys(data.mois[moisChoisi]||initMois());
+
+  const moisLabel = (key) => {
+    const [a,m] = key.split("-").map(Number);
+    return `${MOIS[m]} ${a}`;
+  };
+
+  const recap = calculerRecapVendeurs(moisObj, data.objectifsPM);
+
+  return <div>
+    <div style={{display:"flex",gap:8,marginBottom:16}}>
+      <button onClick={()=>setSousVue("recap")}
+        style={{...base,flex:1,background:sousVue==="recap"?C.primary:C.bg,color:sousVue==="recap"?"#fff":C.textMuted,border:`1px solid ${sousVue==="recap"?C.primary:C.border}`,borderRadius:8,padding:"9px",fontWeight:600,cursor:"pointer",fontSize:13}}>
+        📊 Récap du mois
+      </button>
+      <button onClick={()=>setSousVue("objectifs")}
+        style={{...base,flex:1,background:sousVue==="objectifs"?C.primary:C.bg,color:sousVue==="objectifs"?"#fff":C.textMuted,border:`1px solid ${sousVue==="objectifs"?C.primary:C.border}`,borderRadius:8,padding:"9px",fontWeight:600,cursor:"pointer",fontSize:13}}>
+        🎯 Objectifs par PDV
+      </button>
+    </div>
+
+    {sousVue==="objectifs" && <GestionObjectifsPM objectifsPM={data.objectifsPM} onUpdateData={onUpdateData}/>}
+
+    {sousVue==="recap" && <div>
+      <Card style={{marginBottom:16}}>
+        <SectionHead>Période</SectionHead>
+        <select value={moisChoisi} onChange={e=>setMoisChoisi(e.target.value)}
+          style={{...base,width:"100%",padding:"10px 12px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none",fontSize:14}}>
+          {moisDisponibles.map(k=><option key={k} value={k}>{moisLabel(k)}</option>)}
+        </select>
+      </Card>
+
+      {recap.length===0 && <Card pad={32} style={{textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:12}}>🧑‍💼</div>
+        <div style={{fontWeight:700,fontSize:16,marginBottom:6}}>Aucune donnée</div>
+        <div style={{fontSize:13,color:C.textMuted}}>Aucun panier moyen n'a été renseigné par les vendeurs sur ce mois.</div>
+      </Card>}
+
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {recap.map(v=>{
+          const tauxGlobal = v.global.nbClotures>0 ? (v.global.nbDepassements/v.global.nbClotures*100) : 0;
+          return <Card key={v.vendeurNom} pad={16}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,flexWrap:"wrap",gap:8}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:15}}>🧑‍💼 {v.vendeurNom}</div>
+                <div style={{fontSize:12,color:C.textMuted,marginTop:2}}>{v.global.nbClotures} clôture(s) renseignée(s) · CA total : {v.global.ca.toLocaleString("fr-FR")} €</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:20,fontWeight:800,color:tauxGlobal>=50?C.green:C.accent}}>{v.global.nbDepassements}/{v.global.nbClotures}</div>
+                <div style={{fontSize:11,color:C.textMuted}}>objectif dépassé ({tauxGlobal.toFixed(0)}%)</div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {v.parPdvList.map(pd=>{
+                const taux = pd.nbClotures>0 ? (pd.nbDepassements/pd.nbClotures*100) : 0;
+                return <div key={pd.pdvNom} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.bg,borderRadius:8,padding:"8px 12px",fontSize:12}}>
+                  <div>
+                    <span style={{fontWeight:600}}>{pd.pdvEmoji} {pd.pdvNom}</span>
+                    {pd.objectif>0 && <span style={{color:C.textLight,marginLeft:6}}>obj. {pd.objectif.toLocaleString("fr-FR")}€</span>}
+                    {pd.objectif===0 && <span style={{color:C.accent,marginLeft:6}}>⚠️ objectif non défini</span>}
+                  </div>
+                  <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                    <span style={{color:C.textMuted}}>{pd.ca.toLocaleString("fr-FR")} € CA</span>
+                    <strong style={{color:taux>=50?C.green:C.accent}}>{pd.nbDepassements}/{pd.nbClotures}</strong>
+                  </div>
+                </div>;
+              })}
+            </div>
+          </Card>;
+        })}
+      </div>
+    </div>}
+  </div>;
+}
+
+function GestionObjectifsPM({objectifsPM, onUpdateData}){
+  const [local,setLocal]=useState(()=>({...(objectifsPM||{})}));
+  const [editing,setEditing]=useState(false);
+
+  useEffect(()=>{
+    if(!editing) setLocal({...(objectifsPM||{})});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objectifsPM]);
+
+  const updLocal=(pdvId,val)=>{ setEditing(true); setLocal(prev=>({...prev,[pdvId]:val})); };
+  const commit=(pdvId)=>{
+    setEditing(false);
+    const val = n(local[pdvId]);
+    const cleaned = {...local, [pdvId]: val};
+    setLocal(cleaned);
+    onUpdateData(fresh=>({...fresh, objectifsPM: {...(fresh.objectifsPM||{}), [pdvId]: val}}));
+  };
+
+  return <div>
+    <Card style={{marginBottom:16,background:C.primaryLight}} pad={16}>
+      <div style={{fontSize:12,color:C.textMuted}}>
+        Fixez le panier moyen cible pour chaque point de vente — il servira de référence pour le suivi des primes vendeurs. Les modifications sont enregistrées automatiquement quand vous quittez un champ.
+      </div>
+    </Card>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {PDV_LIST.map(p=>(
+        <Card key={p.id} pad={14}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+            <div style={{fontWeight:600,fontSize:13}}>{p.emoji} {p.full}</div>
+            <div style={{width:130,position:"relative"}}>
+              <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:C.textLight,fontSize:13,pointerEvents:"none"}}>€</span>
+              <input type="number" min="0" step="0.01" value={local[p.id]||""} placeholder="0"
+                onChange={e=>updLocal(p.id,e.target.value)}
+                onBlur={()=>commit(p.id)}
+                onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                style={{...base,width:"100%",padding:"9px 12px 9px 26px",borderRadius:8,border:`1.5px solid ${C.border}`,outline:"none"}}/>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+    <div style={{fontSize:11,color:C.textLight,marginTop:12,textAlign:"center"}}>
+      💾 Cliquez ailleurs après avoir saisi un montant pour l'enregistrer.
+    </div>
+  </div>;
+}
+
 function PanneauFoodCost({data, onUpdateData}){
   const [vue,setVue]=useState("liste"); // liste | nouveau | edition
   const [recetteEditId,setRecetteEditId]=useState(null);
@@ -4030,6 +4205,7 @@ function AppPatron({data,setData,patron,onLogout}){
     {id:"import",label:"Import CSV",icon:"📥"},
     {id:"labo",label:"Laboratoire",icon:"🏭"},
     {id:"vendeurs",label:"Vendeurs",icon:"🧑‍💼"},
+    {id:"recapvendeurs",label:"Récap vendeurs",icon:"📈"},
     {id:"paiements",label:"Modes de paiement",icon:"💳"},
     {id:"objectifs",label:"Mes objectifs",icon:"🎯"},
     {id:"projets",label:"Projets",icon:"🎪"},
@@ -4101,7 +4277,7 @@ function AppPatron({data,setData,patron,onLogout}){
       <div id="main" style={{flex:1,padding:"20px 16px",marginLeft:0,overflowX:"hidden"}}>
         <div style={{marginBottom:18}}>
           <h1 style={{...base,fontSize:18,fontWeight:800,margin:0}}>
-            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="projets"?"🎪 Projets":page==="foodcost"?"🍽️ Food cost":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
+            {page==="dashboard"?"📊 Dashboard":page==="depenses"?"💸 Dépenses":page==="clotures"?"📋 Clôtures":page==="import"?"📥 Import CSV":page==="labo"?"🏭 Laboratoire":page==="vendeurs"?"🧑‍💼 Gestion vendeurs":page==="recapvendeurs"?"📈 Récap vendeurs":page==="paiements"?"💳 Modes de paiement":page==="objectifs"?"🎯 Mes objectifs":page==="projets"?"🎪 Projets":page==="foodcost"?"🍽️ Food cost":page==="export"?"📄 Export mensuel":page==="caisse"?"🏦 Contrôle caisse":page==="rapprochement"?"🔍 Rapprochement bancaire":page==="compte"?"🔑 Mon compte":`${info?.emoji} ${info?.full}`}
           </h1>
           {info&&<div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{info.jours}</div>}
         </div>
@@ -4111,6 +4287,7 @@ function AppPatron({data,setData,patron,onLogout}){
         {page==="labo"&&<PanneauLabo laboCats={data.laboCats} onLaboCatChange={c=>updData(fresh=>({...fresh,laboCats:c}))} laboCh={md.laboCh} onLaboChChange={c=>upd(freshMois=>({...freshMois,laboCh:c}))} moisPdv={md.pdv}/>}
         {info&&<PanneauPDV pdvMois={md.pdv[page]} onPdvChange={p=>upd(freshMois=>({...freshMois,pdv:{...freshMois.pdv,[page]:p}}))} pdvCats={data.pdvCats[page]} onPdvCatChange={c=>updData(fresh=>({...fresh,pdvCats:{...fresh.pdvCats,[page]:c}}))} tLabo={tL} info={info} pct={rep[page]}/>}
         {page==="vendeurs"&&<GestionVendeurs vendeurs={data.vendeurs} patron={patron} onChange={v=>updData(fresh=>({...fresh,vendeurs:v}))}/>}
+        {page==="recapvendeurs"&&<PanneauRecapVendeurs data={data} onUpdateData={updData}/>}
         {page==="import"&&<ImportCSV data={data} md={md} patron={patron} onApplied={async (newData,newMois)=>{ await updData(()=>newData); await upd(()=>newMois); }}/>}
         {page==="paiements"&&<GestionPaiements paiements={data.paiements} onChange={p=>updData(fresh=>({...fresh,paiements:p}))}/>}
         {page==="objectifs"&&<GestionObjectifs objectifs={data.objectifsSectoriels} onChange={o=>updData(fresh=>({...fresh,objectifsSectoriels:o}))}/>}
