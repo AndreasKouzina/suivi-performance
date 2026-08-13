@@ -3015,6 +3015,18 @@ function Dashboard({data,moisData,onUpdateMois}){
     setMontantEvent(""); setModeEvent(""); setSavingEvent(false);
   };
 
+  // Suppression au plus simple : retire la ligne et recalcule le CA total.
+  // Pour corriger un montant, on supprime puis on resaisit — pas de modale
+  // d'édition séparée pour rester simple.
+  const supprimerEvenementiel=async (id)=>{
+    await onUpdateMois(freshMois=>{
+      const ev = freshMois.pdv.evenementiel||{ca:0,encaissements:[]};
+      const encaissements = (ev.encaissements||[]).filter(e=>e.id!==id);
+      const newCa = encaissements.reduce((s,e)=>s+n(e.montant),0);
+      return {...freshMois, pdv:{...freshMois.pdv, evenementiel:{ca:newCa, encaissements}}};
+    });
+  };
+
   return <div>
     {cloturesDuJour.length>0&&<Card style={{background:C.primaryLight,border:`1px solid ${C.primaryMuted}`,marginBottom:20}} pad={14}>
       <div style={{fontSize:12,fontWeight:700,color:C.primary,marginBottom:4}}>✅ {cloturesDuJour.length} clôture{cloturesDuJour.length>1?"s":""} saisie{cloturesDuJour.length>1?"s":""} aujourd'hui</div>
@@ -3040,9 +3052,13 @@ function Dashboard({data,moisData,onUpdateMois}){
       {/* Historique des encaissements événementiels */}
       {(moisData.pdv.evenementiel?.encaissements||[]).length>0 && <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:4}}>
         {(moisData.pdv.evenementiel.encaissements||[]).map(e=>(
-          <div key={e.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,background:"rgba(59,91,219,0.06)",borderRadius:6,padding:"5px 10px"}}>
+          <div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,background:"rgba(59,91,219,0.06)",borderRadius:6,padding:"5px 10px"}}>
             <span style={{color:C.textMuted}}>{e.dateLabel} · {e.modeLabel}</span>
-            <strong style={{color:C.fixe}}>{n(e.montant).toLocaleString("fr-FR")} €</strong>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <strong style={{color:C.fixe}}>{n(e.montant).toLocaleString("fr-FR")} €</strong>
+              <button onClick={()=>{ if(window.confirm("Supprimer cet encaissement ?")) supprimerEvenementiel(e.id); }}
+                style={{...base,background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:15,padding:"0 2px",lineHeight:1}}>×</button>
+            </div>
           </div>
         ))}
       </div>}
