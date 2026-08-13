@@ -152,6 +152,7 @@ function fillPdvKeys(moisObj){
     if(!pdv[p.id]) pdv[p.id] = {ca:0,vars:{},clotures:[]};
   });
   if(!pdv.evenementiel) pdv.evenementiel = {ca:0, encaissements:[]};
+  else if(!pdv.evenementiel.encaissements) pdv.evenementiel = {...pdv.evenementiel, encaissements:[]};
   if(!pdv._depenses) pdv._depenses = [];
   if(!pdv._rapprochements) pdv._rapprochements = [];
   return {...moisObj, laboCh: moisObj.laboCh||{}, pdv};
@@ -1913,7 +1914,7 @@ function ImportCSV({data, md, onApplied}){
     for(const c of credits){
       const choix=pending[c.row.id];
       if(choix && choix.type!=="ignore"){
-        ops.push({...choix, montant:c.row.credit, libelle:c.row.libelle, _learnKeyword:c.k.clean});
+        ops.push({...choix, montant:c.row.credit, libelle:c.row.libelle, dateOp:c.row.dateOp, _learnKeyword:c.k.clean});
       }
     }
 
@@ -1952,8 +1953,26 @@ function ImportCSV({data, md, onApplied}){
           const vars = pdvMois.vars||{};
           moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, [op.pdvId]: {...pdvMois, vars:{...vars,[op.catId]:(n(vars[op.catId])+part)}}}};
         } else if(op.type==="ca_event"){
-          const ev = moisCache[k].pdv.evenementiel || {ca:0};
-          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, evenementiel: {ca:(n(ev.ca)+part)}}};
+          const ev = moisCache[k].pdv.evenementiel || {ca:0, encaissements:[]};
+          // CORRECTIF : on crée une vraie ligne dans encaissements (comme le
+          // fait l'ajout manuel depuis le Dashboard), pas seulement un
+          // incrément du total ca — sinon la ligne est invisible dans
+          // l'historique et impossible à consulter/supprimer individuellement.
+          const dateLabel = op.dateOp
+            ? (()=>{ const [j,m,a]=op.dateOp.split("/"); return `${j}/${m}/${a}`; })()
+            : new Date().toLocaleDateString("fr-FR");
+          const newEnc = {
+            id: uid(),
+            montant: part,
+            modeLabel: "Virement bancaire",
+            date: op.dateOp ? (()=>{ const [j,m,a]=op.dateOp.split("/"); return `${a}-${Number(m)-1}-${Number(j)}`; })() : todayKey(),
+            dateLabel,
+            source: "import_csv",
+            libelleOrigine: op.libelle,
+          };
+          const encaissements = [...(ev.encaissements||[]), newEnc];
+          const newCa = n(ev.ca) + part;
+          moisCache[k] = {...moisCache[k], pdv: {...moisCache[k].pdv, evenementiel: {ca:newCa, encaissements}}};
         }
       }
       if(op._learnKeyword){
