@@ -428,6 +428,17 @@ function extractKeyword(libelle){
     // sans ce nettoyage, la détection de doublons peut manquer une même
     // transaction réimportée avec un chevauchement volontaire de dates.
     .replace(/\b\d{2,}\b/g," ")
+    // CORRECTIF : retire aussi les références ALPHANUMÉRIQUES (mélange de
+    // lettres ET de chiffres, 6 caractères ou plus) — typiquement des
+    // identifiants de virement instantané comme "VK622320C6BZSS01", qui ne
+    // sont jamais retirés par le regex précédent (limité aux séquences
+    // purement numériques). Cas réel rencontré : ce type de référence change
+    // à chaque virement même pour une transaction par ailleurs identique
+    // (même montant, même jour, même origine), faisant échouer la détection
+    // de doublons entre deux imports qui se chevauchent. Le seuil de 6
+    // caractères évite de retirer par erreur de vrais mots courts du libellé
+    // (ex: marques, sigles comme "MAAF", "ZELTY", "ABC").
+    .replace(/\b(?=[A-Z0-9]{6,}\b)(?=[A-Z0-9]*[0-9])(?=[A-Z0-9]*[A-Z])[A-Z0-9]+\b/gi," ")
     .replace(/\s{2,}/g," ").trim();
   return { isComCB, isRemCB, isSumUp, isDepotEspeces, isPrlv, isPaiementCB, isCheque, isVir, clean };
 }
